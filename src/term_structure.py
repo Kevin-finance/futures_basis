@@ -35,10 +35,10 @@ class CubicSplineInterpolation(InterpolationMethod): # 1 func for all data point
 
 class PiecewiseCubicSplineInterpolation(InterpolationMethod):
     def fit(self, x, y):
-        self.curve(x,y,axis=0, extrapolate = True)
+        self.curve = PchipInterpolator(x,y,axis=0, extrapolate = True)
 
     def evaluate(self, t):
-        return self.curve(t) # float(self.curve(t))
+        return float(self.curve(t))
 
 
 

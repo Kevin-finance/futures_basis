@@ -8,23 +8,25 @@ from pathlib import Path
 
 class Preprocessor:
     def __init__(self, dir, calendar: ExpirationCalendar, interpolator_method: str = 'linear'):
-        self.df = self._load_data()
+        self.df = self._load_data(Path(dir))
         self.calendar = calendar  # e.g., ExpirationCalendar('es')
         self.interpolator_method = interpolator_method
         self.interpolator = get_interpolator(method=interpolator_method)
 
-    def _load_data(self , format = "parquet"):
+    def _load_data(self,path:Path):
         # Instead of reading it right away on memory(eager execution), waits until query (lazyframe)
-        if format == "csv":
-            self.df = pl.scan_csv(dir)
+        suffixes = [s.lower() for s in path.suffixes]
+        print(suffixes)
+        if ".csv" in suffixes:
+            self.df = pl.scan_csv(path)
             
-        elif format == "parquet":
-            self.df = pl.scan_parquet(dir)
+        elif ".parquet" in suffixes:
+            self.df = pl.scan_parquet(path)
 
         else:
             raise ValueError("File format not recognized")
+        return self.df
         
-        return self
 
     def parse_dates(self):
         # datetime parsing
@@ -71,9 +73,11 @@ class Preprocessor:
 
 if __name__ == "__main__":
     MANUAL_DATA_DIR = config("MANUAL_DATA_DIR")
+    path = Path(MANUAL_DATA_DIR/"index_data.parquet")
     calendar = ExpirationCalendar(contract_type='es')
-    print(pl.read_parquet(Path(MANUAL_DATA_DIR)/"index_data.parquet"))
-    # a = Preprocessor(dir = Path(MANUAL_DATA_DIR)/"index_data.parquet", calendar = calendar)
-    # print(a.get().collect())
+
+    # print(pl.read_parquet(Path(MANUAL_DATA_DIR)/"index_data.parquet"))
+    a = Preprocessor(dir = path, calendar = calendar)
+    print(a.get().collect())
 
 

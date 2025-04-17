@@ -13,7 +13,7 @@ class Preprocessor:
         self.interpolator_method = interpolator_method
         self.interpolator = get_interpolator(method=interpolator_method)
 
-    def _load_data(self , dir , format = "parquet"):
+    def _load_data(self , format = "parquet"):
         # Instead of reading it right away on memory(eager execution), waits until query (lazyframe)
         if format == "csv":
             self.df = pl.scan_csv(dir)
@@ -71,6 +71,9 @@ class Preprocessor:
 
 if __name__ == "__main__":
     MANUAL_DATA_DIR = config("MANUAL_DATA_DIR")
-    a = Preprocessor(dir = Path(MANUAL_DATA_DIR)/"index_data.parquet")
+    calendar = ExpirationCalendar(contract_type='es')
+    print(pl.read_parquet(Path(MANUAL_DATA_DIR)/"index_data.parquet"))
+    # a = Preprocessor(dir = Path(MANUAL_DATA_DIR)/"index_data.parquet", calendar = calendar)
+    # print(a.get().collect())
 
 

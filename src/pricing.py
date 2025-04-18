@@ -55,7 +55,7 @@ if __name__=="__main__":
     index_df['6M_days'] = (index_df['Date'] + DateOffset(months=6) - index_df['Date']).dt.days /365
 
 
-    #만기 다음날 튀는듯. 1681행행
+    #만기 다음날 튀는듯. 1681행
 
     cme = ExpirationCalendar(contract_type='es')
     method = 'pwc'

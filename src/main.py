@@ -12,6 +12,20 @@ from tqdm import tqdm
 import time
 from settings import config 
 
+# Data I pulled
+# - Index Est. Dividend yield
+# - SOFR Curve for interest rate (SOFR is annualized based on 360 where equitiy index should be 365)
+# - SPX Index PX_LAST
+
+# To do
+# 1. Research and work on interest rate interpolation ( monotonic spline (GPT suggested this haha), linear interpolation etc.)
+# 2. Model how futures price should change according to ex-dividend etc.
+# 3. Research and model compounding, discrete or continouous ? 
+# 4. Data Preprocessing and scalability
+# Also consider borrowing rate should be deducted from the fut price
+# -> Although modelling is daily we might want to code such that we can incorporate and compare tick data?
+
+
 
 
 

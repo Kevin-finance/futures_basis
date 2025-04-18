@@ -7,3 +7,4 @@ def get_interpolator(method: str) :
         return LinearInterpolation()
     elif method == "pwc":
         return PiecewiseCubicSplineInterpolation()
+

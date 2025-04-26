@@ -1,4 +1,4 @@
-from term_structure import LinearInterpolation, PiecewiseCubicSplineInterpolation
+from interpolation_strategy import LinearInterpolation, PiecewiseCubicSplineInterpolation
 
 
 
@@ -7,4 +7,6 @@ def get_interpolator(method: str) :
         return LinearInterpolation()
     elif method == "pwc":
         return PiecewiseCubicSplineInterpolation()
+    else:
+        raise ValueError(f"Unknown interpolation method: {method}")
 

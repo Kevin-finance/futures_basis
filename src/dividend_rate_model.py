@@ -6,8 +6,10 @@ class DividendYieldModel(ABC):
         pass
 
 class FlatDividendModel(DividendYieldModel):
+
     def __init__(self, yield_: float):
         self.yield_ = yield_
 
     def get_dividend(self, t: float) -> float:
         return self.yield_
+    

@@ -1,10 +1,10 @@
 import pandas as pd 
 import polars as pl
-from dividend_rate_model import DividendYieldModel, FlatDividendModel
-from interest_rate_model import InterestRateModel, FlatRateModel
+from models.dividend_rate_model import DividendYieldModel, FlatDividendModel
+from models.interest_rate_strategy import InterestRateModel, FlatRateModel
 from exchange_calendars import ExchangeCalendar
-from interpolation_factory import get_interpolator
-from term_structure import TermStructureModel
+from models.interpolation_factory import get_interpolator
+from models.interpolation_strategy import TermStructureModel
 from expiration_calendar import ExpirationCalendar
 import math
 from datetime import datetime
@@ -24,6 +24,7 @@ from settings import config
 # 4. Data Preprocessing and scalability
 # Also consider borrowing rate should be deducted from the fut price
 # -> Although modelling is daily we might want to code such that we can incorporate and compare tick data?
+# earnings 전후, basis spread 시계열 분석, basis spread+ earnings implied vol로 만드는 차익 시그널. event-driven
 
 
 

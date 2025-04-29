@@ -1,13 +1,13 @@
 import polars as pl
 import pandas as pd
 from expiration_calendar import ExpirationCalendar
-import interpolation_factory 
-import interest_rate_factory 
+import interpolation
+import interest_rate
 from settings import config
 from pathlib import Path
 import numpy as np
 from dateutil.relativedelta import relativedelta
-import interest_rate_strategy
+
 
 class Preprocessor:
     def __init__(self, dir, calendar: ExpirationCalendar,  model_type: str = 'term_structure', interpolation_method: str = None):
@@ -30,7 +30,6 @@ class Preprocessor:
 
         """
 
-
         self.df = self._load_data(Path(dir))
         self.calendar = calendar  # e.g., ExpirationCalendar('es')
     
@@ -47,14 +46,14 @@ class Preprocessor:
         """
 
         if self.model_type == "flat":
-            self.interest_rate_model = interest_rate_factory.get_interest_rate_model(
+            self.interest_rate_model = interest_rate.get_interest_rate_model(
                 model_type="flat",
                 params=params
             )
         elif self.model_type == "term_structure":
             if self.interpolation_method is None:
                 raise ValueError("Interpolation method must be provided for term structure model.")
-            self.interest_rate_model = interest_rate_factory.get_interest_rate_model(
+            self.interest_rate_model = interest_rate.get_interest_rate_model(
                 model_type="term_structure",
                 params={
                     "times": params["times"],
@@ -101,8 +100,8 @@ class Preprocessor:
         FOR FUTURES
         """
         # Checks minimum date and maximum date and save it as a variable(datetime ns)
-        start_date = self.df.select(pl.col("Date").min()).collect().to_series().item().strftime("%Y-%m-%d")
-        end_date = self.df.select(pl.col("Date").max()).collect().to_series().item().strftime("%Y-%m-%d")
+        start_date = self.df.select(pl.col("Date").min()).collect().item().strftime("%Y-%m-%d")
+        end_date = self.df.select(pl.col("Date").max()).collect().item().strftime("%Y-%m-%d")
 
         # Utilize the expiration_calendar.py 
         expirations = self.calendar.get_expiration(start_date, end_date) # returns DateTimeIndex
@@ -324,5 +323,11 @@ if __name__ == "__main__":
     print(sofr.run_all().collect())
 
 
-    
+    ########OUR END GOAL DATAFRAME############
+    # columns
+    #TIMESTAMP |REALTIME_INDEXPOINTS | EXPECTED_DIVPOINTS | INTEREST_RATES |TTM | THEORETICAL Fut| ES TRADE | BTIC |
+    # REALTIME_INDEXPOINTS * e^r(T-t) - EXPECTED DIVPOINTS = THEORETICAL FUT
+    # COMPARE THIS WITH ES TRADE
+    # COMPARE ES TRADE - REALTIME INDEXPOINTS & THEORETICAL - REALTIME INDEXPOINTS with BTIC 
+    # Currently we have everything besides realtime indexpoints
 

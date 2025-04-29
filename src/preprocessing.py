@@ -15,10 +15,10 @@ class Preprocessor:
         Expects dataframe as below and saved in self.df
 
         - Date: datetime[ns]
-        - 1M SOFR: float64
-        - 3M SOFR: float64
-        - 6M SOFR: float64
-        - 12M SOFR: float64
+        - TSFR1M Index: float64
+        - TSFR3M Index: float64
+        - TSFR6M Index: float64
+        - TSFR12M Index: float64
 
         These tenor corresponds to Term SOFR calculated by CME
         This dataframe is in wide format
@@ -71,8 +71,8 @@ class Preprocessor:
         # Instead of reading it right away on memory(eager execution), waits until query (lazyframe)
         suffixes = [s.lower() for s in path.suffixes]
         if ".csv" in suffixes:
-            self.df = pl.scan_csv(path)
-            
+            self.df = pl.scan_csv(path,try_parse_dates=False)
+                                  
         elif ".parquet" in suffixes:
             self.df = pl.scan_parquet(path)
 
@@ -80,6 +80,20 @@ class Preprocessor:
             raise ValueError("File format not recognized")
         return self.df
     
+    def check_data_type(self):
+        self.df = self.df.with_columns(pl.col("Date").str.strptime(pl.Datetime,format="%m/%d/%Y").dt.cast_time_unit("ns"))
+        
+        self.df = self.df.with_columns(
+            [pl.when(pl.col(col)!="#N/A")
+             .then(pl.col(col))
+             .otherwise(None)
+             .cast(pl.Float64)
+             .alias(col) for col, dtype in self.df.schema.items()
+             if col!='Date' and dtype==pl.Utf8]
+        )
+
+        return self
+
 
     def compute_remain_ttm(self):
         """
@@ -87,8 +101,8 @@ class Preprocessor:
         FOR FUTURES
         """
         # Checks minimum date and maximum date and save it as a variable(datetime ns)
-        start_date = self.df.select(pl.col("Date").min()).collect().item().strftime("%Y-%m-%d")
-        end_date = self.df.select(pl.col("Date").max()).collect().item().strftime("%Y-%m-%d")
+        start_date = self.df.select(pl.col("Date").min()).collect().to_series().item().strftime("%Y-%m-%d")
+        end_date = self.df.select(pl.col("Date").max()).collect().to_series().item().strftime("%Y-%m-%d")
 
         # Utilize the expiration_calendar.py 
         expirations = self.calendar.get_expiration(start_date, end_date) # returns DateTimeIndex
@@ -126,12 +140,11 @@ class Preprocessor:
         """
         # This should be changed to 1M , 3M , 6M , 12M , once we have the data
         sofr_columns = [
-        # "1D SOFR", "1W SOFR", "2W SOFR", "3W SOFR",
-        "1M SOFR", "2M SOFR", "3M SOFR", "4M SOFR", "6M SOFR"]
+        "TSFR1M Index", "TSFR3M Index", "TSFR6M Index", "TSFR12M Index"]
 
         index_columns = ['Date','NearMonth_Days','FarMonth_Days','NearMonth_Years','FarMonth_Years']
         self.df = self.df.unpivot(index=index_columns,on= sofr_columns \
-                               ).rename({'variable':"Tenor","value":"Rate"}).sort(['Date','Tenor'])
+                               ).rename({'variable':"Tenor","value":"Rate"}).sort(['Date'])
         # ensure polars casts Rate as float
         self.df = self.df.with_columns(pl.col("Rate").cast(pl.Float64))
         self.df = self.df.with_columns([
@@ -148,28 +161,31 @@ class Preprocessor:
         return self
 
 
-    def parse_dates(self,tenor:str) -> int:
-        # Assuming Date format e.g 1D SOFR
-        # Can be improved to incorporate different # of days for months
+    def parse_dates(self, tenor: str) -> int:
+        # can be improved!
+        tenor_clean = tenor.replace("TSFR", "").replace("Index", "").strip()
         
-        parse_str = tenor.split()[0]
-        num, dt = "",""
-        for string in parse_str:
-            if string.isdigit():
-                num+=string
-            elif string.isalpha():
-                dt += string
+        
+        num, dt = "", ""
+        for char in tenor_clean:
+            if char.isdigit():
+                num += char
+            elif char.isalpha():
+                dt += char
+
         num = int(num)
-        
-        if dt =="D":
+
+        if dt == "D":
             num *= 1
-        elif dt =="W":
-            num*=7
+        elif dt == "W":
+            num *= 7
         elif dt == "M":
-            num*=30
+            num *= 30
+        elif dt == "Y":
+            num *= 365
         else:
-            raise ValueError("Date Type not supported")
-        
+            raise ValueError(f"Unsupported date type: {dt}")
+
         return num
 
     
@@ -186,8 +202,6 @@ class Preprocessor:
 
         return self
 
-
-    # From here review
 
     def build_term_structure(self):
         df = self.df.collect().to_pandas()  # LazyFrame → eager DataFrame → pandas conversion
@@ -224,6 +238,30 @@ class Preprocessor:
 
         return self
 
+    def timezone_aware(self):
+        self.df = self.df.with_columns(
+            pl.col("Date").cast(pl.Datetime(time_unit="ns"))
+        )
+        
+        self.df = self.df.with_columns(
+            pl.col("Date").dt.replace_time_zone("America/Chicago")
+        )
+
+        self.df = self.df.with_columns(
+            (pl.col("Date") + pl.duration(hours=5)).alias("Date")
+        )
+        return self
+    
+    def timezone_str_convert(self):
+        # This is for dividend futures data 
+        self.df = self.df.with_columns((pl.col("Date-Time").str.strptime(pl.Datetime, format="%Y-%m-%dT%H:%M:%S.%9fZ", strict=False)).alias("Date-Time"))
+        self.df = self.df.with_columns((pl.col('Date-Time')+pl.duration(hours=pl.col("GMT Offset"))).alias("Local-Time-UTC"))
+        self.df = self.df.with_columns(pl.col("Local-Time-UTC").dt.convert_time_zone("America/Chicago").alias("Local-Time-Chicago"))
+
+        return self
+    
+    # @staticmethod                                            
+    # def merge_tables(df1,df2)
 
 
 
@@ -231,21 +269,18 @@ class Preprocessor:
         
         return self
 
-    # def clean_columns(self):
-    #     # Remove all unncessary columns
-    #     return self
 
     def run_all(self):
         # Execute All pipleine
         return (
-            self.compute_remain_ttm()
+            self.check_data_type().compute_remain_ttm()
                 .compute_sofr_years()
                 .align_sofr_curve()
-                .build_term_structure()
+                .build_term_structure().timezone_aware()
                 .get()
         )
 
-    
+
 
 
 
@@ -254,26 +289,40 @@ class Preprocessor:
 
 if __name__ == "__main__":
     MANUAL_DATA_DIR = config("MANUAL_DATA_DIR")
-    path = Path(MANUAL_DATA_DIR/"index_data.parquet")
+    sofr_path = Path(MANUAL_DATA_DIR/"SOFR.csv")
+    div_path = Path(MANUAL_DATA_DIR/"SPXDIV.csv")
+    divfut_path = Path(MANUAL_DATA_DIR/"PJ_Lab_SPX_DIV_Trade_03_10_03_14_1min.csv.gz")
+    divfut_quote_path = Path(MANUAL_DATA_DIR/"PJ_Lab_SPX_DIV_Quote_03_10_03_14.csv.gz")
     # path2 = Path(MANUAL_DATA_DIR/"ES_BTIC_1min.csv.gz")
     calendar = ExpirationCalendar(contract_type='es')
 
     # a= pl.read_parquet(Path(MANUAL_DATA_DIR)/"index_data.parquet")
-    a = Preprocessor(dir = path, calendar = calendar, interpolation_method='linear')
-    last = a.run_all().collect()
-    last_selected = last.select(['Date','Near_Rate','Far_Rate'])
-    last_unique = last_selected.unique(subset=['Date'])
-    print(last_unique)
-    path2 = Path(MANUAL_DATA_DIR/"PJ_Lab_SPX_DIV_Trade_03_10_03_14_1min.csv.gz")
-    div_fut = Preprocessor(dir = path2, calendar = calendar)
-    div_idx = pd.read_excel("../data_manual/SPXDIV.xls")
-    # GMT summer time ? augment dividend index to the frame and just subtract
-    # what time is the dividend index published ? 
+    sofr = Preprocessor(dir = sofr_path, calendar = calendar, interpolation_method='linear')
+    div = Preprocessor(dir = div_path, calendar = calendar)
+    divfut = Preprocessor(dir = divfut_path, calendar = calendar)
+    divfut_quote = Preprocessor(dir = divfut_quote_path, calendar = calendar)
+
+    ####EXAMPLES#####
+    # 1) 
+    # Calculating projected dividend points
+    # As there are very minimal trades, I think it makes sense to use quote data
+    # Here I will present using midprice
+
+    # Does preprocessing and then make it to eager dataframe
+    divfut_quote_copy = divfut_quote.timezone_str_convert().get().collect()
+    div_copy = div.check_data_type().timezone_aware().get().collect()
+
+    divfut_quote_copy = divfut_quote_copy.with_columns(
+    ((pl.col("Bid Price") + pl.col("Ask Price")) * 0.5).alias("Mid Price"))
     
+    # Join the dataframe with SPXDIV Index
+    join_df = divfut_quote_copy.join_asof(div_copy, left_on = "Local-Time-Chicago", right_on = 'Date', strategy = 'backward')
+    join_df = join_df.with_columns((pl.col("Mid Price")-pl.col("SPXDIV Index")).alias("Expected Points"))
+    print(join_df.filter(pl.col("Expected Points").is_not_null()))
+
+    #2) Interest rate interpolation
+    print(sofr.run_all().collect())
 
 
-
-    print(div_fut.get().collect())
-    print(div_idx)
-
+    
 

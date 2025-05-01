@@ -8,10 +8,18 @@ from pathlib import Path
 import numpy as np
 from dateutil.relativedelta import relativedelta
 from functools import reduce
+import pandas as pd
+import plotly.graph_objects as go
+from datetime import datetime
+import pytz
 
 
 class Preprocessor:
-    def __init__(self, dir, calendar: ExpirationCalendar,  model_type: str = 'term_structure', interpolation_method: str = None):
+    def __init__(self, dir, calendar: ExpirationCalendar,  model_type: str = 'term_structure', interpolation_method: str = None,
+                 timezone:str = None , batch_time:int = None):
+        # timezone parameter is for timezone you want to declare your daily data as.
+        # America/Chicago for CT , America/New_York for ET
+        # batch_time is the time when the data is published. It is used to add that hour data to daily data so that we are not looking forward
         """
         Expects dataframe as below and saved in self.df
 
@@ -38,6 +46,9 @@ class Preprocessor:
         self.interpolation_method = interpolation_method  
 
         self.interest_rate_model = None
+
+        self.timezone = timezone
+        self.batch_time = batch_time
 
     def build_interest_rate_model(self, params: dict):
         """
@@ -81,6 +92,9 @@ class Preprocessor:
         return self.df
     
     def check_data_type(self):
+        """
+        This converts Date object to datetime and converts #NA to None which is a typical null in bbg data
+        """
         self.df = self.df.with_columns(pl.col("Date").str.strptime(pl.Datetime,format="%m/%d/%Y").dt.cast_time_unit("ns"))
         
         self.df = self.df.with_columns(
@@ -238,6 +252,51 @@ class Preprocessor:
 
         return self
 
+    def convert_to_utc(self):
+        """
+        For Bloomberg and data and daily data in general, they are not timezone aware
+        Thus we need to use the timezone information to convert it into UTC for better comparison
+        """
+        # First convert into Datetime from date
+        # self.df = self.df.with_columns(pl.col("Date").cast(pl.Datetime(time_unit='ns')))
+
+        # Assigns timezone that was put in as input, and then converts it into UTC
+        self.df = self.df.with_columns(pl.col("Date")
+                                       .dt.replace_time_zone(self.timezone)
+                                       .dt.convert_time_zone("UTC")
+                                       .alias("UTC-Datetime"))
+        return self
+
+    def add_time_info(self):
+        """"
+        This methods adds time information for daily data so that we are not looking forward
+        e.g. on 4/11 data we are adding 05:00AM so that when we perform join_asof we are using present data
+        If we add batch time as 
+        """
+
+        # For dividend index data
+        if not isinstance(self.df.schema["Date"], pl.Datetime):
+            self.df = self.df.with_columns(
+                pl.col("Date").str.strptime(pl.Datetime, format="%m/%d/%Y")  
+            )
+        
+
+
+        self.df = self.df.with_columns(
+        (
+            pl.datetime(
+                year=pl.col("Date").dt.year(),
+                month=pl.col("Date").dt.month(),
+                day=pl.col("Date").dt.day(),
+                hour=self.batch_time  # ex: 5
+            )
+            .dt.replace_time_zone(self.timezone)
+            .alias("Date")
+        )
+    )
+                                       
+        return self
+
     def timezone_aware(self):
         self.df = self.df.with_columns(
             pl.col("Date").cast(pl.Datetime(time_unit="ns"))
@@ -287,16 +346,21 @@ class Preprocessor:
 
 
     def run_all(self):
-        # Execute All pipleine
+        # pipeline for sofr
         return (
-            self.check_data_type().compute_remain_ttm()
-                .compute_sofr_years()
-                .align_sofr_curve()
-                .build_term_structure().timezone_aware()
-                .get()
+            self.check_data_type()
+            .compute_remain_ttm()
+            .compute_sofr_years()
+            .align_sofr_curve()
+            .build_term_structure()
+            .add_time_info().convert_to_utc().get()
         )
 
-
+    def run_all2(self):
+        # for dividend index
+        return (
+            self.add_time_info().convert_to_utc().get()
+        )
 
 
 
@@ -305,6 +369,8 @@ class Preprocessor:
 
 if __name__ == "__main__":
     MANUAL_DATA_DIR = config("MANUAL_DATA_DIR")
+
+    # According to CME it distributes SOFR at 5AM CT
     sofr_path = Path(MANUAL_DATA_DIR/"SOFR.csv")
     div_path = Path(MANUAL_DATA_DIR/"SPXDIV.csv")
 
@@ -319,10 +385,12 @@ if __name__ == "__main__":
 
     calendar = ExpirationCalendar(contract_type='es')
 
-    
-    sofr = Preprocessor(dir = sofr_path, calendar = calendar, interpolation_method='linear')
+    sofr = Preprocessor(dir = sofr_path, calendar = calendar, interpolation_method='linear'
+                        ,timezone="America/Chicago", batch_time=5)
 
-    div = Preprocessor(dir = div_path, calendar = calendar)
+    div = Preprocessor(dir = div_path, calendar = calendar,
+                       timezone="America/New_York",batch_time= 19)
+    
     divfut = Preprocessor(dir = divfut_path, calendar = calendar)
     divfut_quote = Preprocessor(dir = divfut_quote_path, calendar = calendar)
 
@@ -331,127 +399,110 @@ if __name__ == "__main__":
     btic_trade = Preprocessor(dir = btic_trade_path, calendar = calendar)
 
 
-    ####EXAMPLES#####
-    # 1) 
-    # Calculating projected dividend points
-    # As there are very minimal trades, I think it makes sense to use quote data
-    # Here I will present using midprice
 
-    # Does preprocessing and then make it to eager dataframe
-    divfut_quote_copy = divfut_quote.timezone_str_convert().get().collect()
-    div_copy = div.check_data_type().timezone_aware().get().collect()
 
-    divfut_quote_copy = divfut_quote_copy.with_columns(
-    ((pl.col("Bid Price") + pl.col("Ask Price")) * 0.5).alias("Mid Price"))
+#     divfut_quote_copy = divfut_quote.timezone_str_convert().get().collect()
+#     div_copy = div.check_data_type().timezone_aware().get().collect()
+
+#     divfut_quote_copy = divfut_quote_copy.with_columns(
+#     ((pl.col("Bid Price") + pl.col("Ask Price")) * 0.5).alias("Mid Price"))
     
-    # Join the dataframe with SPXDIV Index
-    join_df = divfut_quote_copy.join_asof(div_copy, left_on = "Local-Time-Chicago", right_on = 'Date', strategy = 'backward')
-    join_df = join_df.with_columns((pl.col("Mid Price")-pl.col("SPXDIV Index")).alias("Expected Points"))
+#     # Join the dataframe with SPXDIV Index
+#     join_df = divfut_quote_copy.join_asof(div_copy, left_on = "Local-Time-Chicago", right_on = 'Date', strategy = 'backward')
+#     join_df = join_df.with_columns((pl.col("Mid Price")-pl.col("SPXDIV Index")).alias("Expected Points"))
     
 
-    es_copy = es_trade.timezone_str_convert().get().collect()
-    es_copy = es_copy.rename({"Local-Time-Chicago":"Date"})
+#     es_copy = es_trade.timezone_str_convert().get().collect()
+#     es_copy = es_copy.rename({"Local-Time-Chicago":"Date"})
     
-    btic_copy = btic_trade.timezone_str_convert().get().collect()
-    btic_copy = btic_copy.rename({"Local-Time-Chicago":"Date"})
+#     btic_copy = btic_trade.timezone_str_convert().get().collect()
+#     btic_copy = btic_copy.rename({"Local-Time-Chicago":"Date"})
 
 
-
-    # print(join_df.filter(pl.col("Expected Points").is_not_null()))
-
-    #2) Interest rate interpolation
-    # print(sofr.run_all().collect())
-    
-    sofr_df = sofr.run_all().collect().unique(subset=["Date"], keep="first").sort('Date')
-    # print(spx.timezone_str_convert2().get().collect())
-
-    final_div = join_df.filter(pl.col("Expected Points").is_not_null()).select(["Date","Expected Points"])
-    final_rate = sofr_df.select(['Date','Near_Rate','NearMonth_Years'])
-    final_spx = spx.timezone_str_convert2().get().collect().select(['Date','Close'])
-    final_es = es_copy.select(['Date','Last'])
-    final_btic = btic_copy.select(['Date','Last'])
-
-    print(final_div)
-    print(final_rate)
-    print(final_spx)
-    print(final_es)
-    print(final_btic)
-
-    merged = Preprocessor.merge_asof_tables(final_spx,final_rate,final_div,final_es,final_btic,on='Date',strategy= "backward")
-    from datetime import datetime
-    import pytz
-    chicago = pytz.timezone("America/Chicago")
-
-    start = chicago.localize(datetime(2025, 3, 10))
-    end = chicago.localize(datetime(2025, 3, 14))
-
-    merged_filtered = merged.filter(
-        (pl.col("Date") >= start) & (pl.col("Date") <= end)
-    )
-    print(merged_filtered)
-
-    merged_filtered = merged_filtered.with_columns(
-    ((pl.col("Close") - pl.col("Expected Points")) *
-     np.exp((pl.col("Near_Rate") / 100) * pl.col("NearMonth_Years")))
-    .alias("Theoretical Futures Price")
-)
-    merged_filtered = merged_filtered.rename({"Close":"Spot","Expected Points":"Expected Dividend Points",
-                                              "Last":"ES Trade","Last_right":"BTIC"})
-    print(merged_filtered)
-    merged_filtered = merged_filtered.with_columns((pl.col("Theoretical Futures Price")-pl.col("Spot")).alias("Theoretical Basis"))
-    merged_filtered = merged_filtered.with_columns((pl.col("ES Trade")-pl.col("Spot")).alias("Market Basis"))
-
-    print(merged_filtered)
-
-    import pandas as pd
-    import plotly.graph_objects as go
-
-    merged_filtered_pd = merged_filtered.to_pandas()
-    merged_filtered_pd["Date"] = pd.to_datetime(merged_filtered_pd["Date"])
 
     
-    fig = go.Figure()
+#     sofr_df = sofr.run_all().collect().unique(subset=["Date"], keep="first").sort('Date')
 
-    fig.add_trace(go.Scatter(
-        x=merged_filtered_pd["Date"], y=merged_filtered_pd["BTIC"],
-        mode='lines+markers',
-        name='BTIC'
-    ))
 
-    fig.add_trace(go.Scatter(
-        x=merged_filtered_pd["Date"], y=merged_filtered_pd["Theoretical Basis"],
-        mode='lines+markers',
-        name='Theoretical Basis'
-    ))
+#     final_div = join_df.filter(pl.col("Expected Points").is_not_null()).select(["Date","Expected Points"])
+#     final_rate = sofr_df.select(['Date','Near_Rate','NearMonth_Years'])
+#     final_spx = spx.timezone_str_convert2().get().collect().select(['Date','Close'])
+#     final_es = es_copy.select(['Date','Last'])
+#     final_btic = btic_copy.select(['Date','Last'])
 
-    fig.add_trace(go.Scatter(
-        x=merged_filtered_pd["Date"], y=merged_filtered_pd["Market Basis"],
-        mode='lines+markers',
-        name='Market Basis'
-    ))
+#     print(final_div)
+#     print(final_rate)
+#     print(final_spx)
+#     print(final_es)
+#     print(final_btic)
+
+#     merged = Preprocessor.merge_asof_tables(final_spx,final_rate,final_div,final_es,final_btic,on='Date',strategy= "backward")
+
+#     import pytz
+#     chicago = pytz.timezone("America/Chicago")
+
+#     start = chicago.localize(datetime(2025, 3, 10))
+#     end = chicago.localize(datetime(2025, 3, 14))
+
+#     merged_filtered = merged.filter(
+#         (pl.col("Date") >= start) & (pl.col("Date") <= end)
+#     )
+#     print(merged_filtered)
+
+#     merged_filtered = merged_filtered.with_columns(
+#     ((pl.col("Close") - pl.col("Expected Points")) *
+#      np.exp((pl.col("Near_Rate") / 100) * pl.col("NearMonth_Years")))
+#     .alias("Theoretical Futures Price")
+# )
+#     merged_filtered = merged_filtered.rename({"Close":"Spot","Expected Points":"Expected Dividend Points",
+#                                               "Last":"ES Trade","Last_right":"BTIC"})
+#     print(merged_filtered)
+#     merged_filtered = merged_filtered.with_columns((pl.col("Theoretical Futures Price")-pl.col("Spot")).alias("Theoretical Basis"))
+#     merged_filtered = merged_filtered.with_columns((pl.col("ES Trade")-pl.col("Spot")).alias("Market Basis"))
+
+#     print(merged_filtered)
+
+
+#     merged_filtered_pd = merged_filtered.to_pandas()
+#     merged_filtered_pd["Date"] = pd.to_datetime(merged_filtered_pd["Date"])
 
     
-    fig.update_layout(
-        title="BTIC vs Theoretical Basis vs Market Basis",
-        xaxis_title="Time",
-        yaxis_title="Index Points",
-        legend_title="Legend",
-        hovermode='x unified',
-        template='plotly_white',
-        height=600
-    )
+#     fig = go.Figure()
 
-    fig.show()
+#     fig.add_trace(go.Scatter(
+#         x=merged_filtered_pd["Date"], y=merged_filtered_pd["BTIC"],
+#         mode='lines+markers',
+#         name='BTIC'
+#     ))
+
+#     fig.add_trace(go.Scatter(
+#         x=merged_filtered_pd["Date"], y=merged_filtered_pd["Theoretical Basis"],
+#         mode='lines+markers',
+#         name='Theoretical Basis'
+#     ))
+
+#     fig.add_trace(go.Scatter(
+#         x=merged_filtered_pd["Date"], y=merged_filtered_pd["Market Basis"],
+#         mode='lines+markers',
+#         name='Market Basis'
+#     ))
+
+    
+#     fig.update_layout(
+#         title="BTIC vs Theoretical Basis vs Market Basis",
+#         xaxis_title="Time",
+#         yaxis_title="Index Points",
+#         legend_title="Legend",
+#         hovermode='x unified',
+#         template='plotly_white',
+#         height=600
+#     )
+
+#     fig.show()
 
 
 
 
 
-    ########OUR END GOAL DATAFRAME############
-    # columns
-    # Theoretical_Price | Market_Price | BTIC | Theoretical_Basis | Market_Basis | Theoretical_Basis_Rate | Market_Basis_Rate | 
-    # REALTIME_INDEXPOINTS * e^r(T-t) - EXPECTED DIVPOINTS = THEORETICAL FUT
-    # COMPARE THIS WITH ES TRADE
-    # COMPARE ES TRADE - REALTIME INDEXPOINTS & THEORETICAL - REALTIME INDEXPOINTS with BTIC 
-    # Currently we have everything besides realtime indexpoints
+
 

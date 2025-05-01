@@ -13,6 +13,7 @@ from expiration_calendar import ExpirationCalendar
 from settings import config
 
 
+
 class Preprocessor:
     def __init__(
         self,
@@ -23,6 +24,9 @@ class Preprocessor:
         timezone: str = None,
         batch_time: int = None,
     ):
+        # Polars new update - memory management, this guarantees the query does not loads entire data on memory rather loads chunks so parallelization is achieved
+        pl.Config.set_engine_affinity(engine='streaming')
+
         # timezone parameter is for timezone you want to declare your daily data as.
         # America/Chicago for CT , America/New_York for ET
         # batch_time is the time when the data is published. It is used to add that hour data to daily data so that we are not looking forward
@@ -115,7 +119,7 @@ class Preprocessor:
                 .otherwise(None)
                 .cast(pl.Float64)
                 .alias(col)
-                for col, dtype in self.df.schema.items()
+                for col, dtype in self.df.collect_schema().items()
                 if col != "Date" and dtype == pl.Utf8
             ]
         )
@@ -317,7 +321,7 @@ class Preprocessor:
         """
 
         # For dividend index data
-        if not isinstance(self.df.schema["Date"], pl.Datetime):
+        if not isinstance(self.df.collect_schema()["Date"], pl.Datetime):
             self.df = self.df.with_columns(
                 pl.col("Date").str.strptime(pl.Datetime, format="%m/%d/%Y")
             )

@@ -370,7 +370,7 @@ class Preprocessor:
         self.df = self.df.rename({"Date-Time": "UTC-Datetime"})
         self.df = self.df.with_columns(
             (pl.col("UTC-Datetime") + pl.duration(hours=pl.col("GMT Offset")))
-            .dt.convert_time_zone("America/Chicago")
+            .dt.replace_time_zone("America/Chicago")
             .alias("Date")
         )
 

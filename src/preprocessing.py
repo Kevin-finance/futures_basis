@@ -24,7 +24,8 @@ class Preprocessor:
         timezone: str = None,
         batch_time: int = None,
     ):
-        # Polars new update - memory management, this guarantees the query does not loads entire data on memory rather loads chunks so parallelization is achieved
+        # Polars new update - memory management, 
+        # this guarantees the query does not loads entire data on memory rather loads chunks so parallelization is achieved
         pl.Config.set_engine_affinity(engine='streaming')
 
         # timezone parameter is for timezone you want to declare your daily data as.
@@ -43,7 +44,6 @@ class Preprocessor:
         This dataframe is in wide format
 
         Calendar instance is needed to calculate remaining maturity until the near, far month futures expiry as of the date
-        (See add_ttm_columnwise method)
 
         We can also set interpolation method to interest rate, passed as an instance
 
@@ -209,7 +209,7 @@ class Preprocessor:
             [(pl.col("Reference_Date") / 365).alias("Reference_Year")]
         )
 
-        convert_rate = 365 / 360
+        convert_rate = 365/360
         self.df = self.df.with_columns(
             [
                 pl.when(pl.col("Rate").is_not_null())
@@ -294,7 +294,32 @@ class Preprocessor:
         self.df = self.df.join(result_df, on="Date", how="left")
 
         return self
+    
+    ###NEW####
+    def convert_to_continuous_compounding_rates(self):
+        """
+        After interpolated Near_Rate and Far_Rate are created,
+        convert them from simple interest (ACT/365) to continuous compounding.
+        Uses: ln(1 + r * T)
+        """
 
+        self.df = self.df.with_columns([
+            (pl.col("Near_Rate") / 100).alias("Near_Rate_Decimal"),
+            (pl.col("Far_Rate") / 100).alias("Far_Rate_Decimal"),
+        ])
+
+        self.df = self.df.with_columns([
+            (1 + pl.col("Near_Rate_Decimal") * pl.col("NearMonth_Years"))
+            .log()
+            .alias("Near_Rate_CC"),
+
+            (1 + pl.col("Far_Rate_Decimal") * pl.col("FarMonth_Years"))
+            .log()
+            .alias("Far_Rate_CC"),
+        ])
+
+        return self
+    
     def convert_to_utc(self):
         """
         For Bloomberg and data and daily data in general, they are not timezone aware
@@ -317,7 +342,9 @@ class Preprocessor:
         """ "
         This methods adds time information for daily data so that we are not looking forward
         e.g. on 4/11 data we are adding 05:00AM so that when we perform join_asof we are using present data
-        If we add batch time as
+        
+        Need to account for publish / distributed time
+        Dividend index e.g 1/17 data is distributed a day before
         """
 
         # For dividend index data
@@ -341,19 +368,6 @@ class Preprocessor:
 
         return self
 
-    # def timezone_aware(self):
-    #     self.df = self.df.with_columns(
-    #         pl.col("Date").cast(pl.Datetime(time_unit="ns"))
-    #     )
-
-    #     self.df = self.df.with_columns(
-    #         pl.col("Date").dt.replace_time_zone("America/Chicago")
-    #     )
-
-    #     self.df = self.df.with_columns(
-    #         (pl.col("Date") + pl.duration(hours=5)).alias("Date")
-    #     )
-    #     return self
 
     def timezone_str_convert(self):
         # This is to parse Prime Trading provided data date to timezone aware datetime
@@ -361,7 +375,7 @@ class Preprocessor:
         self.df = self.df.with_columns(
             (
                 pl.col("Date-Time").str.strptime(
-                    pl.Datetime, format="%Y-%m-%dT%H:%M:%S.%9fZ", strict=False
+                    pl.Datetime, format="%Y-%m-%dT%H:%M:%S.%9fZ", strict=True
                 )
             )
             .dt.replace_time_zone("UTC")
@@ -380,14 +394,18 @@ class Preprocessor:
         """
         For SPX realtime data from barchart.com where input times are in America/New_York (naive)
         """
+        # First converts timezone naive to ET
         self.df = self.df.with_columns(
             pl.col("Date")
-            .str.strptime(pl.Datetime, format="%m/%d/%Y %H:%M", strict=False)
-            .dt.replace_time_zone("America/New_York")
-            .dt.convert_time_zone("UTC")
-            .cast(pl.Datetime("ns", time_zone="UTC"))
-            .alias("UTC-Datetime")
+            .str.strptime(pl.Datetime, format="%m/%d/%Y %H:%M", strict=True)
+            .dt.replace_time_zone("America/New_York").alias("Date")
         )
+        # Convert that ET to UTC time
+        self.df = self.df.with_columns(pl.col("Date").dt.convert_time_zone("UTC")
+                                      .cast(pl.Datetime("ns", time_zone="UTC"))
+                                    .alias("UTC-Datetime")
+        )
+            
         return self
 
     @staticmethod
@@ -404,9 +422,6 @@ class Preprocessor:
 
         return reduce(join_func, dfs)
 
-    # def compute_futures_price(self):
-
-    #     return self
 
     def run_all(self):
         # pipeline for sofr
@@ -415,7 +430,7 @@ class Preprocessor:
             .compute_remain_ttm()
             .compute_sofr_years()
             .align_sofr_curve()
-            .build_term_structure()
+            .build_term_structure().convert_to_continuous_compounding_rates()
             .add_time_info()
             .convert_to_utc()
             .get()
@@ -430,6 +445,17 @@ class Preprocessor:
 
 
 if __name__ == "__main__":
+    # Memo
+    # Check futures pricing formula
+    # Check batch time
+    # Div quote data very small
+    # 1M - > 30day fixed
+    # Continous compounding conversion
+    # BTIC forward fill? 
+    # maturity - not the whole day (until expiry)
+    # Dividend index does not account for special dividend
+    # interest rate should be calculated only until its expiry not at EOD
+    
     MANUAL_DATA_DIR = config("MANUAL_DATA_DIR")
 
     # According to CME it distributes SOFR at 5AM CT
@@ -454,13 +480,14 @@ if __name__ == "__main__":
     sofr = Preprocessor(
         dir=sofr_path,
         calendar=calendar,
-        interpolation_method="pwc",
+        interpolation_method="linear",
         timezone="America/Chicago",
-        batch_time=5,
+        batch_time=0,
     )
 
     div = Preprocessor(
-        dir=div_path, calendar=calendar, timezone="America/New_York", batch_time=19
+        dir=div_path, calendar=calendar, timezone="America/New_York", batch_time= 0
+        # Reports at 7:00 ET but data today is published a day before 
     )
 
     divfut_trade = Preprocessor(dir=divfut_trade_path, calendar=calendar)
@@ -497,7 +524,7 @@ if __name__ == "__main__":
     final_div = join_df.filter(pl.col("Expected Points").is_not_null()).select(
         ["UTC-Datetime", "Expected Points"]
     )
-    final_rate = sofr_df.select(["UTC-Datetime", "Near_Rate", "NearMonth_Years"])
+    final_rate = sofr_df.select(["UTC-Datetime", "Near_Rate_CC"])
     final_spx = spx_df.select(["UTC-Datetime", "Close"])
     final_es = es_trade_df.select(["UTC-Datetime", "Last"])
     final_btic = btic_trade_df.select(["UTC-Datetime", "Last"])
@@ -520,13 +547,20 @@ if __name__ == "__main__":
     merged_filtered = merged.filter(
         (pl.col("UTC-Datetime") >= start) & (pl.col("UTC-Datetime") <= end)
     )
+    #temporarily comment out 
+    # merged_filtered = merged_filtered.with_columns(
+    #     (
+    #         (pl.col("Close"))
+    #         * np.exp((pl.col("Near_Rate") / 100) * pl.col("NearMonth_Years")) - pl.col("Expected Points")
+    #     ).alias("Theoretical Futures Price")
+    # )
 
     merged_filtered = merged_filtered.with_columns(
-        (
-            (pl.col("Close") - pl.col("Expected Points"))
-            * np.exp((pl.col("Near_Rate") / 100) * pl.col("NearMonth_Years"))
-        ).alias("Theoretical Futures Price")
-    )
+    (
+        pl.col("Close") * pl.col("Near_Rate_CC").exp() - pl.col("Expected Points")
+    ).alias("Theoretical Futures Price")
+)   
+
     merged_filtered = merged_filtered.rename(
         {
             "Close": "Spot",

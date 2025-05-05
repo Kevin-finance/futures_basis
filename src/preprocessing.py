@@ -296,29 +296,29 @@ class Preprocessor:
         return self
     
     ###NEW####
-    def convert_to_continuous_compounding_rates(self):
-        """
-        After interpolated Near_Rate and Far_Rate are created,
-        convert them from simple interest (ACT/365) to continuous compounding.
-        Uses: ln(1 + r * T)
-        """
+    # def convert_to_continuous_compounding_rates(self):
+    #     """
+    #     After interpolated Near_Rate and Far_Rate are created,
+    #     convert them from simple interest (ACT/365) to continuous compounding.
+    #     Uses: ln(1 + r * T)
+    #     """
 
-        self.df = self.df.with_columns([
-            (pl.col("Near_Rate") / 100).alias("Near_Rate_Decimal"),
-            (pl.col("Far_Rate") / 100).alias("Far_Rate_Decimal"),
-        ])
+    #     self.df = self.df.with_columns([
+    #         (pl.col("Near_Rate") / 100).alias("Near_Rate_Decimal"),
+    #         (pl.col("Far_Rate") / 100).alias("Far_Rate_Decimal"),
+    #     ])
 
-        self.df = self.df.with_columns([
-            (1 + pl.col("Near_Rate_Decimal") * pl.col("NearMonth_Years"))
-            .log()
-            .alias("Near_Rate_CC"),
+    #     self.df = self.df.with_columns([
+    #         (1 + pl.col("Near_Rate_Decimal") * pl.col("NearMonth_Years"))
+    #         .log()
+    #         .alias("Near_Rate_CC"),
 
-            (1 + pl.col("Far_Rate_Decimal") * pl.col("FarMonth_Years"))
-            .log()
-            .alias("Far_Rate_CC"),
-        ])
+    #         (1 + pl.col("Far_Rate_Decimal") * pl.col("FarMonth_Years"))
+    #         .log()
+    #         .alias("Far_Rate_CC"),
+    #     ])
 
-        return self
+    #     return self
     
     def convert_to_utc(self):
         """
@@ -430,7 +430,7 @@ class Preprocessor:
             .compute_remain_ttm()
             .compute_sofr_years()
             .align_sofr_curve()
-            .build_term_structure().convert_to_continuous_compounding_rates()
+            .build_term_structure() #.convert_to_continuous_compounding_rates()
             .add_time_info()
             .convert_to_utc()
             .get()
@@ -455,175 +455,5 @@ if __name__ == "__main__":
     # maturity - not the whole day (until expiry)
     # Dividend index does not account for special dividend
     # interest rate should be calculated only until its expiry not at EOD
+    print()
     
-    MANUAL_DATA_DIR = config("MANUAL_DATA_DIR")
-
-    # According to CME it distributes SOFR at 5AM CT
-    sofr_path = Path(MANUAL_DATA_DIR / "SOFR.csv")
-    div_path = Path(MANUAL_DATA_DIR / "SPXDIV.csv")
-
-    divfut_trade_path = Path(
-        MANUAL_DATA_DIR / "PJ_Lab_SPX_DIV_Trade_03_10_03_14_1min.csv.gz"
-    )
-    divfut_quote_path = Path(
-        MANUAL_DATA_DIR / "PJ_Lab_SPX_DIV_Quote_03_10_03_14.csv.gz"
-    )
-
-    spx_path = Path(MANUAL_DATA_DIR / "SPX_1min.csv")
-
-    es_trade_path = Path(MANUAL_DATA_DIR / "PJ_Lab_ES_Trade_03_10_03_14_1min.csv.gz")
-
-    btic_trade_path = Path(MANUAL_DATA_DIR / "PJ_Lab_EST_Trade_03_10_03_14_1min.csv")
-
-    calendar = ExpirationCalendar(contract_type="es")
-
-    sofr = Preprocessor(
-        dir=sofr_path,
-        calendar=calendar,
-        interpolation_method="linear",
-        timezone="America/Chicago",
-        batch_time=0,
-    )
-
-    div = Preprocessor(
-        dir=div_path, calendar=calendar, timezone="America/New_York", batch_time= 0
-        # Reports at 7:00 ET but data today is published a day before 
-    )
-
-    divfut_trade = Preprocessor(dir=divfut_trade_path, calendar=calendar)
-    divfut_quote = Preprocessor(dir=divfut_quote_path, calendar=calendar)
-
-    spx = Preprocessor(dir=spx_path, calendar=calendar)
-    es_trade = Preprocessor(dir=es_trade_path, calendar=calendar)
-    btic_trade = Preprocessor(dir=btic_trade_path, calendar=calendar)
-
-    # Dataframes
-    div_df = div.run_all2().collect()
-    div_fut_quote_df = divfut_quote.timezone_str_convert().get().collect()
-    div_fut_quote_df = div_fut_quote_df.with_columns(
-        ((pl.col("Bid Price") + pl.col("Ask Price")) * 0.5).alias("Mid Price")
-    )
-
-    sofr_df = (
-        sofr.run_all().collect().unique(subset=["Date"], keep="first").sort("Date")
-    )
-
-    spx_df = spx.timezone_str_convert2().get().collect()
-
-    es_trade_df = es_trade.timezone_str_convert().get().collect()
-
-    btic_trade_df = btic_trade.timezone_str_convert().get().collect()
-
-    join_df = div_fut_quote_df.join_asof(
-        div_df, left_on="UTC-Datetime", right_on="UTC-Datetime", strategy="backward"
-    )
-    join_df = join_df.with_columns(
-        (pl.col("Mid Price") - pl.col("SPXDIV Index")).alias("Expected Points")
-    )
-
-    final_div = join_df.filter(pl.col("Expected Points").is_not_null()).select(
-        ["UTC-Datetime", "Expected Points"]
-    )
-    final_rate = sofr_df.select(["UTC-Datetime", "Near_Rate_CC"])
-    final_spx = spx_df.select(["UTC-Datetime", "Close"])
-    final_es = es_trade_df.select(["UTC-Datetime", "Last"])
-    final_btic = btic_trade_df.select(["UTC-Datetime", "Last"])
-
-    merged = Preprocessor.merge_asof_tables(
-        final_spx,
-        final_rate,
-        final_div,
-        final_es,
-        final_btic,
-        on="UTC-Datetime",
-        strategy="backward",
-    )
-
-    utc = pytz.timezone("UTC")
-
-    start = utc.localize(datetime(2025, 3, 10))
-    end = utc.localize(datetime(2025, 3, 14))
-
-    merged_filtered = merged.filter(
-        (pl.col("UTC-Datetime") >= start) & (pl.col("UTC-Datetime") <= end)
-    )
-    #temporarily comment out 
-    # merged_filtered = merged_filtered.with_columns(
-    #     (
-    #         (pl.col("Close"))
-    #         * np.exp((pl.col("Near_Rate") / 100) * pl.col("NearMonth_Years")) - pl.col("Expected Points")
-    #     ).alias("Theoretical Futures Price")
-    # )
-
-    merged_filtered = merged_filtered.with_columns(
-    (
-        pl.col("Close") * pl.col("Near_Rate_CC").exp() - pl.col("Expected Points")
-    ).alias("Theoretical Futures Price")
-)   
-
-    merged_filtered = merged_filtered.rename(
-        {
-            "Close": "Spot",
-            "Expected Points": "Expected Dividend Points",
-            "Last": "ES Trade",
-            "Last_right": "BTIC",
-        }
-    )
-
-    merged_filtered = merged_filtered.with_columns(
-        (pl.col("Theoretical Futures Price") - pl.col("Spot")).alias(
-            "Theoretical Basis"
-        )
-    )
-    merged_filtered = merged_filtered.with_columns(
-        (pl.col("ES Trade") - pl.col("Spot")).alias("Market Basis")
-    )
-
-    merged_filtered_pd = merged_filtered.to_pandas()
-    merged_filtered_pd["UTC-Datetime"] = pd.to_datetime(
-        merged_filtered_pd["UTC-Datetime"]
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=merged_filtered_pd["UTC-Datetime"],
-            y=merged_filtered_pd["BTIC"],
-            mode="lines+markers",
-            name="BTIC",
-            line=dict(color="rgba(100, 200, 100, 0.3)"),
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=merged_filtered_pd["UTC-Datetime"],
-            y=merged_filtered_pd["Theoretical Basis"],
-            mode="lines+markers",
-            name="Theoretical Basis",
-            line=dict(color="rgba(0, 100, 200, 0.3)"),
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=merged_filtered_pd["UTC-Datetime"],
-            y=merged_filtered_pd["Market Basis"],
-            mode="lines+markers",
-            name="Market Basis",
-            line=dict(color="rgba(100, 100, 200, 0.3)"),
-        )
-    )
-
-    fig.update_layout(
-        title="BTIC vs Theoretical Basis vs Market Basis",
-        xaxis_title="Time",
-        yaxis_title="Index Points",
-        legend_title="Legend",
-        hovermode="x unified",
-        template="plotly_white",
-        height=600,
-    )
-
-    fig.show()

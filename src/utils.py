@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 from functools import reduce
+from plotly.subplots import make_subplots
 
 def merge_and_filter(
     dfs: List[pl.DataFrame],
@@ -76,6 +77,100 @@ def plot_basis(df_pd: pd.DataFrame,in_bps: bool = False):
         title=title,
         xaxis_title="Time",
         yaxis_title="Basis Rate" if in_bps else "Index Points",
+        legend_title="Legend",
+        hovermode="x unified",
+        template="plotly_white",
+        height=600,
+    )
+
+    return fig
+
+
+def plot_basis_dual(df_pd: pd.DataFrame, in_bps: bool = False):
+    output_pd = df_pd.copy()
+    output_pd["UTC-Datetime"] = pd.to_datetime(output_pd["UTC-Datetime"])
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    if in_bps:
+        
+        fig.add_trace(
+            go.Scatter(
+                x=output_pd["UTC-Datetime"],
+                y=output_pd["Theoretical Basis Rate"],
+                mode="lines+markers",
+                name="Theoretical Basis Rate",
+                line=dict(color="rgba(0, 100, 200, 0.8)"),
+            ),
+            secondary_y=False,
+        )
+
+    
+        fig.add_trace(
+            go.Scatter(
+                x=output_pd["UTC-Datetime"],
+                y=output_pd["Market Basis Rate"],
+                mode="lines+markers",
+                name="Market Basis Rate",
+                line=dict(color="rgba(100, 100, 200, 0.5)"),
+            ),
+            secondary_y=True,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=output_pd["UTC-Datetime"],
+                y=output_pd["BTIC Rate"],
+                mode="lines+markers",
+                name="BTIC Rate",
+                line=dict(color="rgba(100, 200, 100, 0.5)"),
+            ),
+            secondary_y=True,
+        )
+
+        fig.update_yaxes(title_text="Theoretical Basis Rate (bps)", secondary_y=False)
+        fig.update_yaxes(title_text="Market & BTIC Basis Rate (bps)", secondary_y=True)
+        fig.update_layout(title="Basis Rate Comparison (bps)")
+
+    else:
+     
+        fig.add_trace(
+            go.Scatter(
+                x=output_pd["UTC-Datetime"],
+                y=output_pd["Theoretical Basis"],
+                mode="lines+markers",
+                name="Theoretical Basis",
+                line=dict(color="rgba(0, 100, 200, 0.8)"),
+            ),
+            secondary_y=False,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=output_pd["UTC-Datetime"],
+                y=output_pd["Market Basis"],
+                mode="lines+markers",
+                name="Market Basis",
+                line=dict(color="rgba(100, 100, 200, 0.5)"),
+            ),
+            secondary_y=True,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=output_pd["UTC-Datetime"],
+                y=output_pd["BTIC"],
+                mode="lines+markers",
+                name="BTIC",
+                line=dict(color="rgba(100, 200, 100, 0.5)"),
+            ),
+            secondary_y=True,
+        )
+
+        fig.update_yaxes(title_text="Theoretical Basis (Index Points)", secondary_y=False)
+        fig.update_yaxes(title_text="Market & BTIC (Index Points)", secondary_y=True)
+        fig.update_layout(title="Basis Comparison (Index Points)")
+
+    fig.update_layout(
+        xaxis_title="Time",
         legend_title="Legend",
         hovermode="x unified",
         template="plotly_white",

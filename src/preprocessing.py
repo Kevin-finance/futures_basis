@@ -11,6 +11,7 @@ import pytz
 import interest_rate
 from expiration_calendar import ExpirationCalendar
 from settings import config
+from dateutil.relativedelta import relativedelta
 
 
 
@@ -25,12 +26,12 @@ class Preprocessor:
         batch_time: int = None,
     ):
         # Polars new update - memory management, 
-        # this guarantees the query does not loads entire data on memory rather loads chunks so parallelization is achieved
+        # This guarantees the query does not loads entire data on memory rather loads chunks so parallelization is achieved
         pl.Config.set_engine_affinity(engine='streaming')
 
-        # timezone parameter is for timezone you want to declare your daily data as.
+        # Timezone parameter is for timezone you want to declare your daily data as.
         # America/Chicago for CT , America/New_York for ET
-        # batch_time is the time when the data is published. It is used to add that hour data to daily data so that we are not looking forward
+        # Batch_time is the time when the data is published. It is used to add that hour data to daily data so that we are not looking forward
         """
         Expects dataframe as below and saved in self.df
 
@@ -104,14 +105,18 @@ class Preprocessor:
 
     def check_data_type(self):
         """
-        This converts Date object to datetime and converts #NA to None which is a typical null in bbg data
+        This converts Date object to datetime and converts #NA to None 
+        which is a typical null in bbg data
         """
+        #Step1. Parses Date column in string to datetime object 
         self.df = self.df.with_columns(
             pl.col("Date")
             .str.strptime(pl.Datetime, format="%m/%d/%Y")
             .dt.cast_time_unit("ns")
         )
 
+        #Step2. Ensuring each column is float type not a string due to #N/A values
+        # If this process is that processed , then the column's dtype is set to string
         self.df = self.df.with_columns(
             [
                 pl.when(pl.col(col) != "#N/A")
@@ -127,65 +132,150 @@ class Preprocessor:
         return self
 
     def compute_remain_ttm(self):
+        
         """
         This method calculates remaining maturity until the near month and far month in days and years
-        FOR FUTURES
+        This brings in the expiration dates using expiration_calendar module (which now taken into account expiration "time")
+        Previously calculated time to maturity as EOD but now, its time to maturity is calculated until 9:30AM ET
+        
         """
-        # Checks minimum date and maximum date and save it as a variable(datetime ns)
-        start_date = (
-            self.df.select(pl.col("Date").min()).collect().item().strftime("%Y-%m-%d")
-        )
-        end_date = (
-            self.df.select(pl.col("Date").max()).collect().item().strftime("%Y-%m-%d")
-        )
+      
+        # Step 1: Fully lazy min/max extraction, pulls out minimum and maximum date as expression
+        minmax_expr = self.df.select([
+            pl.col("UTC-Datetime").min().alias("start_date"),
+            pl.col("UTC-Datetime").max().alias("end_date")
+        ])
+        minmax = minmax_expr.collect()
+        start_date = minmax[0, "start_date"]
+        end_date = minmax[0, "end_date"]
 
-        # Utilize the expiration_calendar.py
-        expirations = self.calendar.get_expiration(
-            start_date, end_date
-        )  # returns DateTimeIndex
-        expirations = pd.to_datetime(expirations)
-
-        dates = self.df.select("Date").collect().to_pandas()["Date"]
-
-        # For each dates you run a loop, filters expiration that is after than current date and find first two
-        # Subtract current date from the corresponding maturity
-        if self.calendar.contract_forward == 2:
-            near_days = []
-            far_days = []
-            for val_date in dates:
-                expiries_after = expirations[expirations > val_date]
-                first = expiries_after[0]
-                second = expiries_after[1]
-                near_days.append((first - val_date).days)
-                far_days.append((second - val_date).days)
-
-            # Putting together in polars again
-            self.df = self.df.with_columns(
-                [
-                    pl.Series(name="NearMonth_Days", values=near_days),
-                    pl.Series(name="FarMonth_Days", values=far_days),
-                    (pl.Series(name="NearMonth_Days", values=near_days) / 365).alias(
-                        "NearMonth_Years"
-                    ),
-                    (pl.Series(name="FarMonth_Days", values=far_days) / 365).alias(
-                        "FarMonth_Years"
-                    ),
-                ]
+        # Step 2: Create 1min interval datetime range (pl.duration doesnt support minute interval) - eagerframe
+        minute_df = pl.DataFrame({
+            "UTC-Datetime": pl.datetime_range(
+                start=start_date,
+                end=end_date ,
+                interval='1m',
+                time_unit="ns",
+                eager=True
             )
-        else:
-            raise ValueError("Currently contract forward over 2 not supported")
+        })
+
+        # Step 3: Lazy join back to original df via asof
+        # By using join_asof using strategy= 'backward', the sofr data is forward filled
+        self.df = minute_df.lazy().join_asof(self.df, left_on="UTC-Datetime", right_on="UTC-Datetime", strategy="backward")
+
+        # Step 4: Expiration table (eager since expiration_list comes externally)
+        # The way how we find nearest and far expiry is by using join_asof. 
+        # By using strategy='forward' we look for nearest value forward in time
+        expiration = self.calendar.get_expiration(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+        
+        df_near = pl.DataFrame({"NearExpiry": expiration[:-1], "Date_Near": expiration[:-1]
+                                }).with_columns([
+                                pl.col("NearExpiry").cast(pl.Datetime("ns", "UTC")),
+                                pl.col("Date_Near").cast(pl.Datetime("ns", "UTC"))
+                            ]).lazy()
+        df_far = pl.DataFrame({"FarExpiry": expiration[1:], "Date_Near": expiration[:-1]
+                               }).with_columns([
+                                pl.col("FarExpiry").cast(pl.Datetime("ns", "UTC")),
+                                pl.col("Date_Near").cast(pl.Datetime("ns", "UTC"))
+                            ]).lazy()
+
+        # Step 5: Join near/far expiry onto main dataframe
+        self.df = self.df.join_asof(df_near, left_on="UTC-Datetime", right_on="Date_Near", strategy="forward")
+        self.df = self.df.join(df_far, on="Date_Near", how="left")
+
+        self.df = self.df.with_columns([
+        pl.col("NearExpiry").cast(pl.Datetime("ns", "UTC")),
+        pl.col("FarExpiry").cast(pl.Datetime("ns", "UTC"))
+    ])
+
+        # Step 6: Compute days and years to each expiry (fully lazy)
+        # This calculation needed because we want exact maturity time
+        days_in_seconds = 60 * 60 * 24
+        years_in_seconds = days_in_seconds * 365
+
+        self.df = self.df.with_columns([
+            ((pl.col("NearExpiry") - pl.col("UTC-Datetime")).dt.total_seconds() / days_in_seconds).alias("NearMonth_Days"),
+            ((pl.col("FarExpiry") - pl.col("UTC-Datetime")).dt.total_seconds() / days_in_seconds).alias("FarMonth_Days"),
+            ((pl.col("NearExpiry") - pl.col("UTC-Datetime")).dt.total_seconds() / years_in_seconds).alias("NearMonth_Years"),
+            ((pl.col("FarExpiry") - pl.col("UTC-Datetime")).dt.total_seconds() / years_in_seconds).alias("FarMonth_Years")
+        ])
+        
+        
 
         return self
+    
+    ##temp##
+    # def compute_remain_ttm(self):
+    #     # Needs to compute TTM until 9:30AM not until the end of the day.
+    #     # Need to reinterpolate for each minute to be precise
+    #     """
+    #     This method calculates remaining maturity until the near month and far month in days and years
+    #     FOR FUTURES
+    #     """
+    #     # Checks minimum date and maximum date and save it as a variable(datetime ns)
+    #     start_date = (
+    #     self.df.select(pl.col("Date").min()).collect().item().strftime("%Y-%m-%d")
+    # )
+    #     end_date = (
+    #     self.df.select(pl.col("Date").max()).collect().item().strftime("%Y-%m-%d")
+    # )
+    #     from datetime import datetime, time
+    # # 2. Get expiration dates
+    #     expirations = self.calendar.get_expiration(start_date, end_date)
+    #     expirations = pd.to_datetime(expirations)
+
+    #     # 3. Build 9:30AM ET timestamp for each expiration date
+    #     et_zone = pytz.timezone("America/New_York")
+    #     expiry_times = [
+    #         et_zone.localize(datetime.combine(d.date(), time(9, 30))).astimezone(pytz.UTC)
+    #         for d in expirations
+    #     ]
+
+    #     # 4. Get valuation dates from dataframe
+    #     dates = self.df.select("Date").collect().to_pandas()["Date"]  # should be timezone-aware UTC
+
+    #     if self.calendar.contract_forward == 2:
+    #         near_days, far_days = [], []
+    #         near_years, far_years = [], []
+
+    #         for val_date in dates:
+    #             expiries_after = [e for e in expiry_times if e > val_date]
+    #             first = expiries_after[0]
+    #             second = expiries_after[1]
+
+    #             td1 = (first - val_date).total_seconds() / (60 * 60 * 24)
+    #             td2 = (second - val_date).total_seconds() / (60 * 60 * 24)
+
+    #             near_days.append(td1)
+    #             far_days.append(td2)
+    #             near_years.append(td1 / 365)
+    #             far_years.append(td2 / 365)
+
+    #         self.df = self.df.with_columns(
+    #             [
+    #                 pl.Series("NearMonth_Days", near_days),
+    #                 pl.Series("FarMonth_Days", far_days),
+    #                 pl.Series("NearMonth_Years", near_years),
+    #                 pl.Series("FarMonth_Years", far_years),
+    #             ]
+    #         )
+    #     else:
+    #         raise ValueError("Currently contract forward over 2 not supported")
+
+    #     return self
 
     def compute_sofr_years(self):
         """
-        Convert Term sofr to years e.g 1D-> 1/365 years
+        This method converts Term SOFR month to years
+        This now handles different month days (e.g March 31days, April : 30days)
         """
+
         # This should be changed to 1M , 3M , 6M , 12M , once we have the data
         sofr_columns = ["TSFR1M Index", "TSFR3M Index", "TSFR6M Index", "TSFR12M Index"]
 
         index_columns = [
-            "Date",
+            "UTC-Datetime",
             "NearMonth_Days",
             "FarMonth_Days",
             "NearMonth_Years",
@@ -194,21 +284,14 @@ class Preprocessor:
         self.df = (
             self.df.unpivot(index=index_columns, on=sofr_columns)
             .rename({"variable": "Tenor", "value": "Rate"})
-            .sort(["Date"])
+            .sort(["UTC-Datetime"])
         )
-        # ensure polars casts Rate as float
-        self.df = self.df.with_columns(pl.col("Rate").cast(pl.Float64))
-        self.df = self.df.with_columns(
-            [
-                pl.col("Tenor")
-                .map_elements(lambda t: self.parse_dates(t), return_dtype=pl.Int64)
-                .alias("Reference_Date")
-            ]
-        )
-        self.df = self.df.with_columns(
-            [(pl.col("Reference_Date") / 365).alias("Reference_Year")]
-        )
-
+        
+        self.df = self.parse_dates().get()
+ 
+        # Please revise this code #
+        # Check convert rate, I checked SOFR is quoted as 360days but do double check
+        # convert this into continous rates
         convert_rate = 365/360
         self.df = self.df.with_columns(
             [
@@ -217,49 +300,72 @@ class Preprocessor:
                 .otherwise(None)
             ]
         )
+
+        
         return self
 
-    def parse_dates(self, tenor: str) -> int:
-        # Converts Term Sofr literal into days
-        # e.g. 1M - >30 days
-        tenor_clean = tenor.replace("TSFR", "").replace("Index", "").strip()
+    def parse_dates(self):
+        """
+        Adds Reference_Date and Reference_Year columns by parsing tenor from 'Tenor' column
+        and shifting 'Date' column by the appropriate amount using relativedelta.
+        This parses month part of data and then finds the right month days.
+        """
+        
 
-        num, dt = "", ""
-        for char in tenor_clean:
-            if char.isdigit():
-                num += char
-            elif char.isalpha():
-                dt += char
+        def shift_by_tenor(date, tenor):
+            # TSFR1M Index -> 1M
+            # num = 1, dt = M
+            tenor_clean = tenor.replace("TSFR", "").replace("Index", "").strip()
+            num = ''.join(filter(str.isdigit, tenor_clean))
+            dt = ''.join(filter(str.isalpha, tenor_clean))
 
-        num = int(num)
+            if dt == "M":
+                return date + relativedelta(months=int(num))
+            else:
+                raise ValueError(f"Unsupported tenor type: {tenor}")
 
-        if dt == "D":
-            num *= 1
-        elif dt == "W":
-            num *= 7
-        elif dt == "M":
-            num *= 30
-        elif dt == "Y":
-            num *= 365
-        else:
-            raise ValueError(f"Unsupported date type: {dt}")
+        # Step 1: extract Date and Tenor eagerly
+        df_eager = self.df.select(["UTC-Datetime", "Tenor"]).collect()
 
-        return num
+        # Step 2: apply Python shift
+        reference_dates = [
+            shift_by_tenor(date, tenor)
+            for date, tenor in zip(df_eager["UTC-Datetime"], df_eager["Tenor"])
+        ]
+
+        # Step 3: make a new column and add to LazyFrame
+
+        df_ref = pl.DataFrame({"Reference_Date": reference_dates}).with_columns(
+            pl.col("Reference_Date").cast(pl.Datetime("ns", "UTC"))
+        )
+
+        # Step 4: concatenate horizontally
+        self.df = self.df.with_columns(df_ref)
+
+        # Step 5: compute Reference_Days and Reference_Year
+        self.df = self.df.with_columns([
+            (pl.col("Reference_Date") - pl.col("UTC-Datetime")).dt.total_days().alias("Reference_Days"),
+            ((pl.col("Reference_Date") - pl.col("UTC-Datetime")).dt.total_days() / 365.0).alias("Reference_Year")
+        ])
+        
+        return self
 
     def align_sofr_curve(self):
         """align rates and take care of null values
         remove rows with Rates having null values
-        We need this process so that we are not putting null values in the interpolator"""
+        We need this process so that we are not putting null values in the interpolator
+        Also, Lazyframe doesnt guarantee the order of dataframe so we need sorting
+        """
 
         self.df = self.df.filter(pl.col("Rate").is_not_null())
-        self.df = self.df.sort(by=["Date", "Reference_Date"], descending=[False, False])
+        self.df = self.df.sort(by=["UTC-Datetime", "Reference_Date"], descending=[False, False])
 
         return self
 
     def build_term_structure(self):
         """
         This produces near month and far month interest rate corresponding to each tenor
-        by running interpolation we set.
+        by running interpolation method we set.
 
 
         """
@@ -268,7 +374,7 @@ class Preprocessor:
         )  # LazyFrame → eager DataFrame → pandas conversion
 
         results = []
-        for date, group in df.groupby("Date"):
+        for date, group in df.groupby("UTC-Datetime"):
             x = group["Reference_Year"].to_numpy()
             y = group["Rate"].to_numpy()
 
@@ -279,22 +385,21 @@ class Preprocessor:
             near_rate = self.interest_rate_model.get_rate(near)
             far_rate = self.interest_rate_model.get_rate(far)
 
-            results.append({"Date": date, "Near_Rate": near_rate, "Far_Rate": far_rate})
+            results.append({"UTC-Datetime": date.isoformat(), "Near_Rate": near_rate, "Far_Rate": far_rate})
 
         result_df = pl.DataFrame(results).with_columns(
-            [
-                pl.col("Near_Rate").cast(pl.Float64),
-                pl.col("Far_Rate").cast(pl.Float64),
-            ]
-        )
-        result_df = result_df.with_columns(
-            pl.col("Date").cast(pl.Datetime("ns"))
-        ).lazy()
+    [
+        pl.col("UTC-Datetime").str.strptime(pl.Datetime("ns", time_zone="UTC"), strict=False),
+        pl.col("Near_Rate").cast(pl.Float64),
+        pl.col("Far_Rate").cast(pl.Float64),
+    ]
+    ).lazy()
 
-        self.df = self.df.join(result_df, on="Date", how="left")
-
+        # 
+        self.df = self.df.join(result_df, on="UTC-Datetime", how="left")
+        
         return self
-    
+        
     ###NEW####
     # def convert_to_continuous_compounding_rates(self):
     #     """
@@ -349,22 +454,29 @@ class Preprocessor:
 
         # For dividend index data
         if not isinstance(self.df.collect_schema()["Date"], pl.Datetime):
+            
             self.df = self.df.with_columns(
                 pl.col("Date").str.strptime(pl.Datetime, format="%m/%d/%Y")
             )
+            
+        # First converts to your preset timezone and then converts back to UTC
+        utc_datetime_expr = (
+        pl.datetime(
+            year=pl.col("Date").dt.year(),
+            month=pl.col("Date").dt.month(),
+            day=pl.col("Date").dt.day(),
+            hour=pl.lit(self.batch_time), 
+            time_unit="ns"
+        )
+        .dt.replace_time_zone(self.timezone)
+        .dt.convert_time_zone("UTC")
+    )
 
         self.df = self.df.with_columns(
-            (
-                pl.datetime(
-                    year=pl.col("Date").dt.year(),
-                    month=pl.col("Date").dt.month(),
-                    day=pl.col("Date").dt.day(),
-                    hour=self.batch_time,  # ex: 5
-                )
-                .dt.replace_time_zone(self.timezone)
-                .alias("Date")
-            )
-        )
+        utc_datetime_expr.alias("UTC-Datetime")
+    )
+        
+        print("add_time_info",self.df.fetch(5))
 
         return self
 
@@ -424,15 +536,16 @@ class Preprocessor:
 
 
     def run_all(self):
-        # pipeline for sofr
+        """
+        This is a pipeline for sofr data
+        """
         return (
-            self.check_data_type()
-            .compute_remain_ttm()
+            self.check_data_type().add_time_info() 
+            .compute_remain_ttm() 
             .compute_sofr_years()
             .align_sofr_curve()
             .build_term_structure() #.convert_to_continuous_compounding_rates()
-            .add_time_info()
-            .convert_to_utc()
+            # .convert_to_utc()
             .get()
         )
 
@@ -445,15 +558,16 @@ class Preprocessor:
 
 
 if __name__ == "__main__":
+    print("test")
     # Memo
     # Check futures pricing formula
     # Check batch time
     # Div quote data very small
     # 1M - > 30day fixed
     # Continous compounding conversion
-    # BTIC forward fill? 
+    
     # maturity - not the whole day (until expiry)
     # Dividend index does not account for special dividend
     # interest rate should be calculated only until its expiry not at EOD
-    print()
+    
     

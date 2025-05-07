@@ -22,12 +22,36 @@ def merge_and_filter(
     merged = reduce(_join, dfs)
     return merged.filter((pl.col(on) >= start) & (pl.col(on) <= end))
 
+def compute_adjustments(df:pl.DataFrame) -> pl.DataFrame:
+
+    df = df.with_columns((pl.col("Expected Points")*0.79).alias("Div Tax"))
+
+
+    # This method compute adjustments to computing theoretical price 
+    # Convexity Adjustment (We set vol to 0.2, implied vol for past 30d as of 5/5)
+
+    # Tax (60/40 IRC 1256)
+
+
+    # Bid-Ask Spread / Slippage
+
+
+    # Clearing fee / brokerage fee
+
+
+
+
+
+    return df
+
+
+
 def compute_theoretical_prices(df: pl.DataFrame) -> pl.DataFrame:
     # Spot, Near_Rate, NearMonth_Years, Expected Points 
     return df.with_columns(
         (
-            pl.col("Close") * np.exp((pl.col("Near_Rate")/100) * pl.col("NearMonth_Years"))
-            - pl.col("Expected Points")
+            pl.col("Close") * np.exp((pl.col("Near_Rate")/100) * pl.col("NearMonth_Years") )
+            - (pl.col("Expected Points")-pl.col("Div Tax"))
         ).alias("Theoretical Futures Price")
     )
 

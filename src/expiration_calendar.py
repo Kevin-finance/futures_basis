@@ -28,7 +28,11 @@ class ExpirationCalendar:
             end_date = datetime.strptime(end_date, "%Y-%m-%d")+relativedelta(months=self.contract_forward*3)
             end_date = datetime.strftime(end_date, format = "%Y-%m-%d")
             expiration_dates= self.exchange.quarterly_expiries.holidays(start=start_date, end = end_date)
-        
+            # can be improved
+            # convert timezone naive expiration to ET 9:30AM and then converting back to UTC
+            
+            expiration_dates = (expiration_dates+pd.Timedelta(hours=9,minutes=30)).tz_localize("America/New_York").tz_convert("UTC")
+            
         elif self.roll_months == list(range(1,13)):
             end_date = datetime.strptime(end_date, "%Y-%m-%d")+relativedelta(months=self.contract_forward)
             end_date = datetime.strftime(end_date, format = "%Y-%m-%d")
@@ -44,7 +48,6 @@ if __name__ =="__main__":
     start = "2023-01-01"
     end = "2024-12-31"
     print(ec.get_expiration(start,end))
-    # print(ec.get_expiration(start))
 
-
+    
 

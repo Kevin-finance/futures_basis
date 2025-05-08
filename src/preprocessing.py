@@ -288,19 +288,30 @@ class Preprocessor:
         )
         
         self.df = self.parse_dates().get()
- 
-        # Please revise this code #
-        # Check convert rate, I checked SOFR is quoted as 360days but do double check
-        # convert this into continous rates
         convert_rate = 365/360
-        self.df = self.df.with_columns(
-            [
-                pl.when(pl.col("Rate").is_not_null())
-                .then(pl.col("Rate") * convert_rate)
-                .otherwise(None)
-            ]
-        )
 
+        # old code:
+        # self.df = self.df.with_columns(
+        #     [
+        #         pl.when(pl.col("Rate").is_not_null())
+        #         .then(pl.col("Rate") * convert_rate)
+        #         .otherwise(None)
+        #     ]
+        # )
+
+        # updated code to convert simple rate into continuously compounded rate:
+        # r_simple_pct   = Rate * convert_rate
+        # r_simple_dec   = r_simple_pct / 100
+        # total_cc       = ln(1 + r_simple_dec * Reference_Year)
+        # annual_cc      = total_cc / Reference_Year
+        # r_cc_pct       = annual_cc * 100
+        self.df = self.df.with_columns(
+                pl.when(pl.col("Rate").is_not_null())
+                .then(((1 + (pl.col("Rate") * convert_rate) / 100 * pl.col("Reference_Year"))
+                .log() / pl.col("Reference_Year")) * 100)
+                .otherwise(None)
+                .alias("Rate")
+        )
         
         return self
 
@@ -569,5 +580,6 @@ if __name__ == "__main__":
     # maturity - not the whole day (until expiry)
     # Dividend index does not account for special dividend
     # interest rate should be calculated only until its expiry not at EOD
+
     
     

@@ -15,28 +15,29 @@ def load_all_data():
     calendar = ExpirationCalendar(contract_type="es")
 
     # Assigning path to data
-    sofr_path = Path(MANUAL_DATA_DIR / "SOFR.csv")
+    sofr_path = Path(MANUAL_DATA_DIR / "SOFR_partial.csv")
     div_path = Path(MANUAL_DATA_DIR / "SPXDIV.csv")
 
     # divfut_trade_path = Path(
     #     MANUAL_DATA_DIR / "PJ_Lab_SPX_DIV_Trade_03_10_03_14_1min.csv.gz"
     # )
     divfut_quote_path = Path(
-        MANUAL_DATA_DIR / "PJ_Lab_SPX_DIV_Quote_03_10_03_14.csv.gz"
+        MANUAL_DATA_DIR / "ES_DIV_1yr_Quote.csv.gz"
     )
 
     spx_path = Path(MANUAL_DATA_DIR / "SPX_1min.csv")
 
-    es_trade_path = Path(MANUAL_DATA_DIR / "PJ_Lab_ES_Trade_03_10_03_14_1min.csv.gz")
+    es_trade_path = Path(MANUAL_DATA_DIR / "ES_1yr_Trade.csv.gz")
 
-    btic_trade_path = Path(MANUAL_DATA_DIR / "PJ_Lab_EST_Trade_03_10_03_14_1min.csv")
+    btic_trade_path = Path(MANUAL_DATA_DIR / "BTIC_1yr_Trade.csv.gz")
 
     # Preprocessor instances for all data
     sofr = Preprocessor(sofr_path, calendar,
-                        interpolation_method="linear",
-                        timezone="America/Chicago", batch_time=5)
+                        interpolation_method="pwc",
+                        timezone="America/Chicago", batch_time= 5)
     div = Preprocessor(div_path, calendar,
-                       timezone="America/New_York", batch_time=19)
+                       timezone="America/New_York", batch_time= 5)
+    # In reality we should set as 10
     # divfut_trade = Preprocessor(dir=divfut_trade_path, calendar=calendar)
     divfut_quote = Preprocessor(dir=divfut_quote_path, calendar=calendar)
 
@@ -60,7 +61,8 @@ def load_all_data():
 def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
 
     # Still sticking to lazyframe / df is lazyframes
-    sofr_df = sofr_df.unique(subset=['Date']).sort("Date")
+    sofr_df = sofr_df.unique(subset=['UTC-Datetime']).sort("UTC-Datetime")
+
     # Calculating Mid-Price for dividend futures data
     
     div_fut_quote_df = div_fut_quote_df.with_columns(
@@ -68,7 +70,7 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
     )
 
     join_df = div_fut_quote_df.join_asof(
-        div_df, left_on="UTC-Datetime", right_on="UTC-Datetime", strategy="forward"
+        div_df, left_on="UTC-Datetime", right_on="UTC-Datetime", strategy="backward"
     )
 
     join_df = join_df.with_columns(
@@ -89,11 +91,12 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
          es_df.select(["UTC-Datetime","Last"]),
          btic_df.select(["UTC-Datetime","Last"]),
          final_div.select(["UTC-Datetime", "Expected Points"])],
-        on="UTC-Datetime", strategy="forward", tolerance=None,
+        on="UTC-Datetime", strategy="backward", tolerance=None,
         start=start, end=end
     )
 
     # Compute Theoretical price and finalize columns to be displayed
+    merged = utils.compute_adjustments(merged)
     merged = utils.compute_theoretical_prices(merged)
     merged = utils.finalize_columns(merged)
 
@@ -101,12 +104,16 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
 
 def main():
     sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df  = load_all_data()
+    
     merged = prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df).collect()
     
     merged_pd = merged.to_pandas()
     merged_pd["UTC-Datetime"] = pd.to_datetime(merged_pd["UTC-Datetime"])
     utils.plot_basis(merged_pd).show()
     utils.plot_basis(merged_pd,in_bps=True).show()
+    utils.plot_basis_dual(merged_pd).show()
+    utils.plot_basis_dual(merged_pd,in_bps=True).show()
 
 if __name__ == "__main__":
     main()
+    

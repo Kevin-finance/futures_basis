@@ -24,7 +24,7 @@ def merge_and_filter(
 
 def compute_adjustments(df:pl.DataFrame) -> pl.DataFrame:
 
-    df = df.with_columns((pl.col("Expected Points")*0.79).alias("Div Tax"))
+    df = df.with_columns((pl.col("Expected Points")*0.21).alias("Div Tax"))
 
 
     # This method compute adjustments to computing theoretical price 

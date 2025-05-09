@@ -109,7 +109,6 @@ def main():
     
     output_path = Path(config("MANUAL_DATA_DIR")) / "theo.parquet"
     merged.write_parquet(output_path)
-    print(f"Wrote {len(merged)} rows to {output_path!r}")
 
     merged_pd = merged.to_pandas()
     merged_pd["UTC-Datetime"] = pd.to_datetime(merged_pd["UTC-Datetime"])

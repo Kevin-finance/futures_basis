@@ -312,7 +312,8 @@ class Preprocessor:
                 .otherwise(None)
                 .alias("Rate")
         )
-        
+        # restore a bare Date column for any later unique()/sort()/join on "Date"
+        self.df = self.df.with_columns(pl.col("UTC-Datetime").alias("Date"))
         return self
 
     def parse_dates(self):

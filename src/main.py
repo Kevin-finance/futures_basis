@@ -107,8 +107,14 @@ def main():
     
     merged = prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df).collect()
     
+    output_path = Path(config("MANUAL_DATA_DIR")) / "theo.parquet"
+    merged.write_parquet(output_path)
+    print(f"Wrote {len(merged)} rows to {output_path!r}")
+
     merged_pd = merged.to_pandas()
     merged_pd["UTC-Datetime"] = pd.to_datetime(merged_pd["UTC-Datetime"])
+
+    
     utils.plot_basis(merged_pd).show()
     utils.plot_basis(merged_pd,in_bps=True).show()
     utils.plot_basis_dual(merged_pd).show()

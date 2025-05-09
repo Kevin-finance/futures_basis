@@ -25,7 +25,7 @@ def load_all_data():
         MANUAL_DATA_DIR / "ES_DIV_1yr_Quote.csv.gz"
     )
 
-    spx_path = Path(MANUAL_DATA_DIR / "SPX_1yr_1min.csv")
+    spx_path = Path(MANUAL_DATA_DIR / "SPX_1min.csv")
 
     es_trade_path = Path(MANUAL_DATA_DIR / "ES_1yr_Trade.csv.gz")
 
@@ -59,25 +59,15 @@ def load_all_data():
     return sofr_df, div_df, spx_df, es_trade_df, btic_trade_df , div_fut_quote_df
 
 def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
-    # We need to get rid of the null values it is currently a string.
-    # so I used enforced it to a float at the moment
-
-
-
-
-
-
-
 
     # Still sticking to lazyframe / df is lazyframes
     sofr_df = sofr_df.unique(subset=['UTC-Datetime']).sort("UTC-Datetime")
 
     # Calculating Mid-Price for dividend futures data
-    # Lazyframe doesnt guarantee the order we need to sort it after operation.
-
+    
     div_fut_quote_df = div_fut_quote_df.with_columns(
         ((pl.col("Bid Price") + pl.col("Ask Price")) * 0.5).alias("Mid Price")
-    ).sort("UTC-Datetime")
+    )
 
     join_df = div_fut_quote_df.join_asof(
         div_df, left_on="UTC-Datetime", right_on="UTC-Datetime", strategy="backward"
@@ -87,14 +77,12 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
         (pl.col("Mid Price") - pl.col("SPXDIV Index")).alias("Expected Points")
     )
 
-    es_df= es_df.sort("UTC-Datetime")
-    btic_df = btic_df.sort("UTC-Datetime")
     final_div = join_df.filter(pl.col("Expected Points").is_not_null())
 
 
     # Filters out whatever is out of start, end range
-    start = pytz.UTC.localize(datetime(2024,4,25))
-    end   = pytz.UTC.localize(datetime(2025,4,25))
+    start = pytz.UTC.localize(datetime(2025,3,10))
+    end   = pytz.UTC.localize(datetime(2025,3,14))
 
     merged = utils.merge_and_filter(
         [spx_df.select(["UTC-Datetime","Close"]),
@@ -106,13 +94,6 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
         on="UTC-Datetime", strategy="backward", tolerance=None,
         start=start, end=end
     )
-
-   # Temporary fix
-    merged = merged.with_columns([
-        pl.col("Last").cast(pl.Float64),
-        pl.col("Last_right").cast(pl.Float64),
-    ])
-
 
     # Compute Theoretical price and finalize columns to be displayed
     merged = utils.compute_adjustments(merged)

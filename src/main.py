@@ -126,8 +126,6 @@ def main():
     
     merged = prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df).collect()
     
-    output_path = Path(config("MANUAL_DATA_DIR")) / "theo.parquet"
-    merged.write_parquet(output_path)
 
     merged_pd = merged.to_pandas()
     merged_pd["UTC-Datetime"] = pd.to_datetime(merged_pd["UTC-Datetime"])

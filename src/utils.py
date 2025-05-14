@@ -24,19 +24,11 @@ def merge_and_filter(
 
 def compute_adjustments(df:pl.DataFrame) -> pl.DataFrame:
 
-    df = df.with_columns((pl.col("Expected Points")*0.21).alias("Div Tax"))
-
-
-    # This method compute adjustments to computing theoretical price 
-    # Convexity Adjustment (We set vol to 0.2, implied vol for past 30d as of 5/5)
-
-    # Tax (60/40 IRC 1256)
-
-
-    # Bid-Ask Spread / Slippage
-
-
-    # Clearing fee / brokerage fee
+    # df = df.with_columns((pl.col("Expected Points")*0.21).alias("Div Tax"))
+    # df = df.with_columns((pl.col("Expected Points")*(1-np.exp(-pl.col("Near_Rate")*pl.col("NearMonth_Years")/100))
+    #                      /(pl.col("Near_Rate")*pl.col("NearMonth_Years")/100)).alias("Expected Discounted Points"))
+    
+    # we can assume future dividend payouts are paid evenly throughout the timeframe and deduct that from fut price(interest rate rolling out for divs)
 
 
 
@@ -50,10 +42,11 @@ def compute_theoretical_prices(df: pl.DataFrame) -> pl.DataFrame:
     # Spot, Near_Rate, NearMonth_Years, Expected Points 
     return df.with_columns(
         (
-            pl.col("Close") * np.exp((pl.col("Near_Rate")/100) * pl.col("NearMonth_Years") )
-            - (pl.col("Expected Points")-pl.col("Div Tax"))
+            (pl.col("Close") * (np.exp(((pl.col("Near_Rate")/100)+(pl.col("Financing_Spread")/10000)) * pl.col("NearMonth_Years")) )
+            - (pl.col("Expected Discounted Points")))
         ).alias("Theoretical Futures Price")
     )
+
 
 def finalize_columns(df: pl.DataFrame) -> pl.DataFrame:
     df = df.rename({

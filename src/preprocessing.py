@@ -102,6 +102,14 @@ class Preprocessor:
         else:
             raise ValueError("File format not recognized")
         return self.df
+    
+    def remove_null(self):
+        """
+        This methods removes row that contains null values for every column
+        """
+        # pl.all().is_null() produces a series and masking only all True values
+        self.df = self.df.filter(~pl.all_horizontal(pl.all().is_null()))
+        return self
 
     def check_data_type(self):
         """
@@ -130,6 +138,54 @@ class Preprocessor:
         )
 
         return self
+
+    def parse_front_month(self):
+        """
+        This method parses only the front month contract for a given date
+        """
+        # This parses month letter and year from #RIC column
+        # ESH25 -> pull H, 25
+        self.df = self.df.with_columns([
+        pl.col("#RIC").str.slice(2, 1).alias("month_code"),
+        (2000 + pl.col("#RIC").str.slice(3, 2).cast(pl.Int32)).alias("contract_year")
+    ])
+
+        # Month code mapping
+        # New column contract_month mapping e.g H->3 and then filters out null rows
+        self.df = self.df.with_columns([
+                pl.when(pl.col("month_code") == "F").then(1).when(pl.col("month_code") == "G").then(2)
+                .when(pl.col("month_code") == "H").then(3).when(pl.col("month_code") == "J").then(4)
+                .when(pl.col("month_code") == "K").then(5).when(pl.col("month_code") == "M").then(6)
+                .when(pl.col("month_code") == "N").then(7).when(pl.col("month_code") == "Q").then(8)
+                .when(pl.col("month_code") == "U").then(9).when(pl.col("month_code") == "V").then(10)
+                .when(pl.col("month_code") == "X").then(11).when(pl.col("month_code") == "Z").then(12)
+                .otherwise(None).alias("contract_month")
+            ]).filter(pl.col("contract_month").is_not_null())
+
+        self.df = self.df.with_columns([
+                pl.concat_str([
+                    pl.col("contract_year").cast(pl.Utf8),
+                    pl.lit("-"),
+                    pl.col("contract_month").cast(pl.Utf8).str.zfill(2),
+                    pl.lit("-01")
+                ]).str.strptime(pl.Date, "%Y-%m-%d")
+                .cast(pl.Datetime("ns"))
+                .dt.replace_time_zone("UTC")
+                .alias("contract_expiry")
+            ]).sort(by='contract_expiry')
+        
+        start = self.df.select(pl.col("UTC-Datetime").min()).collect().item().strftime("%Y-%m-%d")
+        end = self.df.select(pl.col("UTC-Datetime").max()).collect().item().strftime("%Y-%m-%d")
+        expiration = pl.DataFrame({"expiry":self.calendar.get_expiration(start,end)}).sort(by='expiry').lazy()
+        
+        self.df = self.df.join_asof(expiration,left_on='contract_expiry',right_on='expiry',strategy='forward')
+        closest_expiry = self.df.group_by("UTC-Datetime").agg(pl.col("contract_expiry").min().alias("min_expiry"))
+        self.df = self.df.join(closest_expiry,on='UTC-Datetime')
+        self.df = self.df.filter(pl.col("contract_expiry")==pl.col("min_expiry"))
+        self.df = self.df.drop(['month_code','contract_year','contract_month','contract_expiry','expiry','min_expiry'])
+        
+        return self
+
 
     def compute_remain_ttm(self):
         
@@ -205,65 +261,6 @@ class Preprocessor:
 
         return self
     
-    ##temp##
-    # def compute_remain_ttm(self):
-    #     # Needs to compute TTM until 9:30AM not until the end of the day.
-    #     # Need to reinterpolate for each minute to be precise
-    #     """
-    #     This method calculates remaining maturity until the near month and far month in days and years
-    #     FOR FUTURES
-    #     """
-    #     # Checks minimum date and maximum date and save it as a variable(datetime ns)
-    #     start_date = (
-    #     self.df.select(pl.col("Date").min()).collect().item().strftime("%Y-%m-%d")
-    # )
-    #     end_date = (
-    #     self.df.select(pl.col("Date").max()).collect().item().strftime("%Y-%m-%d")
-    # )
-    #     from datetime import datetime, time
-    # # 2. Get expiration dates
-    #     expirations = self.calendar.get_expiration(start_date, end_date)
-    #     expirations = pd.to_datetime(expirations)
-
-    #     # 3. Build 9:30AM ET timestamp for each expiration date
-    #     et_zone = pytz.timezone("America/New_York")
-    #     expiry_times = [
-    #         et_zone.localize(datetime.combine(d.date(), time(9, 30))).astimezone(pytz.UTC)
-    #         for d in expirations
-    #     ]
-
-    #     # 4. Get valuation dates from dataframe
-    #     dates = self.df.select("Date").collect().to_pandas()["Date"]  # should be timezone-aware UTC
-
-    #     if self.calendar.contract_forward == 2:
-    #         near_days, far_days = [], []
-    #         near_years, far_years = [], []
-
-    #         for val_date in dates:
-    #             expiries_after = [e for e in expiry_times if e > val_date]
-    #             first = expiries_after[0]
-    #             second = expiries_after[1]
-
-    #             td1 = (first - val_date).total_seconds() / (60 * 60 * 24)
-    #             td2 = (second - val_date).total_seconds() / (60 * 60 * 24)
-
-    #             near_days.append(td1)
-    #             far_days.append(td2)
-    #             near_years.append(td1 / 365)
-    #             far_years.append(td2 / 365)
-
-    #         self.df = self.df.with_columns(
-    #             [
-    #                 pl.Series("NearMonth_Days", near_days),
-    #                 pl.Series("FarMonth_Days", far_days),
-    #                 pl.Series("NearMonth_Years", near_years),
-    #                 pl.Series("FarMonth_Years", far_years),
-    #             ]
-    #         )
-    #     else:
-    #         raise ValueError("Currently contract forward over 2 not supported")
-
-    #     return self
 
     def compute_sofr_years(self):
         """
@@ -288,9 +285,9 @@ class Preprocessor:
         )
         
         self.df = self.parse_dates().get()
+        
         convert_rate = 365/360
-
-        # old code:
+         # old code:
         # self.df = self.df.with_columns(
         #     [
         #         pl.when(pl.col("Rate").is_not_null())
@@ -314,6 +311,8 @@ class Preprocessor:
         )
         # restore a bare Date column for any later unique()/sort()/join on "Date"
         self.df = self.df.with_columns(pl.col("UTC-Datetime").alias("Date"))
+
+        
         return self
 
     def parse_dates(self):
@@ -412,30 +411,6 @@ class Preprocessor:
         
         return self
         
-    ###NEW####
-    # def convert_to_continuous_compounding_rates(self):
-    #     """
-    #     After interpolated Near_Rate and Far_Rate are created,
-    #     convert them from simple interest (ACT/365) to continuous compounding.
-    #     Uses: ln(1 + r * T)
-    #     """
-
-    #     self.df = self.df.with_columns([
-    #         (pl.col("Near_Rate") / 100).alias("Near_Rate_Decimal"),
-    #         (pl.col("Far_Rate") / 100).alias("Far_Rate_Decimal"),
-    #     ])
-
-    #     self.df = self.df.with_columns([
-    #         (1 + pl.col("Near_Rate_Decimal") * pl.col("NearMonth_Years"))
-    #         .log()
-    #         .alias("Near_Rate_CC"),
-
-    #         (1 + pl.col("Far_Rate_Decimal") * pl.col("FarMonth_Years"))
-    #         .log()
-    #         .alias("Far_Rate_CC"),
-    #     ])
-
-    #     return self
     
     def convert_to_utc(self):
         """
@@ -487,15 +462,16 @@ class Preprocessor:
         self.df = self.df.with_columns(
         utc_datetime_expr.alias("UTC-Datetime")
     )
-        
-        print("add_time_info",self.df.fetch(5))
 
         return self
 
 
     def timezone_str_convert(self):
-        # This is to parse Prime Trading provided data date to timezone aware datetime
+        """
+        This converts Prime Trading provided dataframe column Date-Time into timezone aware datetime instance
+        """
 
+        # Parses string to datetime instance and then to UTC 
         self.df = self.df.with_columns(
             (
                 pl.col("Date-Time").str.strptime(
@@ -504,8 +480,9 @@ class Preprocessor:
             )
             .dt.replace_time_zone("UTC")
             .alias("Date-Time")
-        )
-        self.df = self.df.rename({"Date-Time": "UTC-Datetime"})
+        ).rename({"Date-Time":"UTC-Datetime"})
+        
+        # Use GMT Offset information to add CDT column Date
         self.df = self.df.with_columns(
             (pl.col("UTC-Datetime") + pl.duration(hours=pl.col("GMT Offset")))
             .dt.replace_time_zone("America/Chicago")
@@ -570,17 +547,12 @@ class Preprocessor:
 
 
 if __name__ == "__main__":
-    print("test")
-    # Memo
-    # Check futures pricing formula
-    # Check batch time
-    # Div quote data very small
-    # 1M - > 30day fixed
-    # Continous compounding conversion
+    MANUAL_DATA_DIR = config("MANUAL_DATA_DIR")
+    calendar = ExpirationCalendar(contract_type="es")
     
-    # maturity - not the whole day (until expiry)
-    # Dividend index does not account for special dividend
-    # interest rate should be calculated only until its expiry not at EOD
-
+    es_trade_path = Path(MANUAL_DATA_DIR / "ES_1yr_Trade.csv.gz")
+    es_trade = Preprocessor(dir=es_trade_path, calendar=calendar)
+    
+    
     
     

@@ -18,9 +18,6 @@ def load_all_data():
     sofr_path = Path(MANUAL_DATA_DIR / "SOFR_partial.csv")
     div_path = Path(MANUAL_DATA_DIR / "SPXDIV.csv")
 
-    # divfut_trade_path = Path(
-    #     MANUAL_DATA_DIR / "PJ_Lab_SPX_DIV_Trade_03_10_03_14_1min.csv.gz"
-    # )
     divfut_quote_path = Path(
         MANUAL_DATA_DIR / "ES_DIV_1yr_Quote.csv.gz"
     )
@@ -31,9 +28,11 @@ def load_all_data():
 
     btic_trade_path = Path(MANUAL_DATA_DIR / "BTIC_1yr_Trade.csv.gz")
 
+    financing_cost_path = Path(MANUAL_DATA_DIR/"SPX_Financing_Spread.parquet")
+
     # Preprocessor instances for all data
     sofr = Preprocessor(sofr_path, calendar,
-                        interpolation_method="pwc",
+                        interpolation_method="linear",
                         timezone="America/Chicago", batch_time= 5)
     div = Preprocessor(div_path, calendar,
                        timezone="America/New_York", batch_time= 5)
@@ -44,6 +43,7 @@ def load_all_data():
     spx = Preprocessor(dir=spx_path, calendar=calendar)
     es_trade = Preprocessor(dir=es_trade_path, calendar=calendar)
     btic_trade = Preprocessor(dir=btic_trade_path, calendar=calendar)
+    financing_cost = Preprocessor(dir=financing_cost_path, calendar=calendar)
 
     # Still sticking to lazyframe / df is lazyframes
     sofr_df = sofr.run_all()
@@ -52,21 +52,17 @@ def load_all_data():
 
     spx_df = spx.timezone_str_convert2().get()
 
-    es_trade_df = es_trade.timezone_str_convert().get()
+    es_trade_df = es_trade.remove_null().timezone_str_convert().parse_front_month().get()
 
     btic_trade_df = btic_trade.timezone_str_convert().get()
 
-    return sofr_df, div_df, spx_df, es_trade_df, btic_trade_df , div_fut_quote_df
+    financing_cost_df = financing_cost.get()
 
-def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
+    return sofr_df, div_df, spx_df, es_trade_df, btic_trade_df , div_fut_quote_df, financing_cost_df
+
+def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df,financing_cost_df):
     # We need to get rid of the null values it is currently a string.
     # so I used enforced it to a float at the moment
-
-
-
-
-
-
 
 
     # Still sticking to lazyframe / df is lazyframes
@@ -93,8 +89,8 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
 
 
     # Filters out whatever is out of start, end range
-    start = pytz.UTC.localize(datetime(2024,4,25))
-    end   = pytz.UTC.localize(datetime(2025,4,25))
+    start = pytz.UTC.localize(datetime(2024,10,1))
+    end   = pytz.UTC.localize(datetime(2024,12,31))
 
     merged = utils.merge_and_filter(
         [spx_df.select(["UTC-Datetime","Close"]),
@@ -102,7 +98,8 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
          div_df.select(["UTC-Datetime","SPXDIV Index"]),
          es_df.select(["UTC-Datetime","Last"]),
          btic_df.select(["UTC-Datetime","Last"]),
-         final_div.select(["UTC-Datetime", "Expected Points"])],
+         final_div.select(["UTC-Datetime", "Expected Points"]),
+         financing_cost_df.select("UTC-Datetime","Financing_Spread")],
         on="UTC-Datetime", strategy="backward", tolerance=None,
         start=start, end=end
     )
@@ -113,18 +110,25 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df):
         pl.col("Last_right").cast(pl.Float64),
     ])
 
-
+    merged = merged.with_columns(
+    (
+        pl.col("Expected Points") *
+        (1 - (-pl.col("Near_Rate") * pl.col("NearMonth_Years") / 100).exp())
+        / (pl.col("Near_Rate") * pl.col("NearMonth_Years") / 100)
+    ).alias("Expected Discounted Points")
+)
+    
     # Compute Theoretical price and finalize columns to be displayed
-    merged = utils.compute_adjustments(merged)
+    
     merged = utils.compute_theoretical_prices(merged)
     merged = utils.finalize_columns(merged)
 
     return merged
 
 def main():
-    sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df  = load_all_data()
+    sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df, financing_cost_df  = load_all_data()
     
-    merged = prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df).collect()
+    merged = prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df, financing_cost_df).collect()
     
 
     merged_pd = merged.to_pandas()
@@ -138,4 +142,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+   
     

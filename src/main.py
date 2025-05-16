@@ -32,7 +32,7 @@ def load_all_data():
 
     # Preprocessor instances for all data
     sofr = Preprocessor(sofr_path, calendar,
-                        interpolation_method="linear",
+                        interpolation_method="pwc",
                         timezone="America/Chicago", batch_time= 5)
     div = Preprocessor(div_path, calendar,
                        timezone="America/New_York", batch_time= 5)
@@ -48,13 +48,13 @@ def load_all_data():
     # Still sticking to lazyframe / df is lazyframes
     sofr_df = sofr.run_all()
     div_df = div.run_all2()
-    div_fut_quote_df = divfut_quote.timezone_str_convert().get()
+    div_fut_quote_df = divfut_quote.timezone_str_convert().parse_front_month().get()
 
     spx_df = spx.timezone_str_convert2().get()
 
     es_trade_df = es_trade.remove_null().timezone_str_convert().parse_front_month().get()
 
-    btic_trade_df = btic_trade.timezone_str_convert().get()
+    btic_trade_df = btic_trade.timezone_str_convert().parse_front_month().get()
 
     financing_cost_df = financing_cost.get()
 
@@ -71,10 +71,17 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df,fin
     # Calculating Mid-Price for dividend futures data
     # Lazyframe doesnt guarantee the order we need to sort it after operation.
 
-    div_fut_quote_df = div_fut_quote_df.with_columns(
+    div_fut_quote_df = (
+    div_fut_quote_df
+    .with_columns([
         ((pl.col("Bid Price") + pl.col("Ask Price")) * 0.5).alias("Mid Price")
-    ).sort("UTC-Datetime")
-
+    ])
+    .sort("UTC-Datetime")
+    .with_columns([
+        pl.col("Mid Price").fill_null(strategy="forward")
+    ])
+)
+    
     join_df = div_fut_quote_df.join_asof(
         div_df, left_on="UTC-Datetime", right_on="UTC-Datetime", strategy="backward"
     )
@@ -89,7 +96,7 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df,fin
 
 
     # Filters out whatever is out of start, end range
-    start = pytz.UTC.localize(datetime(2024,10,1))
+    start = pytz.UTC.localize(datetime(2024,7,1))
     end   = pytz.UTC.localize(datetime(2024,12,31))
 
     merged = utils.merge_and_filter(
@@ -116,7 +123,7 @@ def prepare_merged(sofr_df, div_df, spx_df, es_df, btic_df, div_fut_quote_df,fin
         (1 - (-pl.col("Near_Rate") * pl.col("NearMonth_Years") / 100).exp())
         / (pl.col("Near_Rate") * pl.col("NearMonth_Years") / 100)
     ).alias("Expected Discounted Points")
-)
+).sort("UTC-Datetime")
     
     # Compute Theoretical price and finalize columns to be displayed
     
@@ -133,14 +140,23 @@ def main():
 
     merged_pd = merged.to_pandas()
     merged_pd["UTC-Datetime"] = pd.to_datetime(merged_pd["UTC-Datetime"])
-
+    fig1 = utils.plot_spreads(merged_pd)
+    fig1.write_html("plot_spreads_linear.html")
+    fig2 = utils.plot_percentage_changes(merged_pd)
+    fig2.write_html("plot_percentage_changes_linear.html")
+    fig3 = utils.plot_twinx(merged_pd)
+    fig3.write_html("plot_twinx_linear.html")
+    fig4 = utils.plot_twinx_for_date(pl.from_pandas(merged_pd),"2024-08-07")
+    fig4.write_html("plot_twinx_for_date_linear.html")
     
-    utils.plot_basis(merged_pd).show()
-    utils.plot_basis(merged_pd,in_bps=True).show()
-    utils.plot_basis_dual(merged_pd).show()
-    utils.plot_basis_dual(merged_pd,in_bps=True).show()
+    # utils.plot_basis(merged_pd).show()
+    # utils.plot_basis(merged_pd,in_bps=True).show()
+    # utils.plot_basis_dual(merged_pd).show()
+    # utils.plot_basis_dual(merged_pd,in_bps=True).show()
 
 if __name__ == "__main__":
     main()
+    
+        
    
     

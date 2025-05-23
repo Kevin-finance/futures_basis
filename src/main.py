@@ -193,7 +193,7 @@ def main():
 
     merged_pd = merged1.to_pandas()
     merged_pd["UTC-Datetime"] = pd.to_datetime(merged_pd["UTC-Datetime"])
-    # merged_pd.to_csv("merged2.csv")
+    
     fig1 = utils.plot_spreads(merged_pd)
     fig1.write_html("plot_spreads_linear.html")
     fig2 = utils.plot_percentage_changes(merged_pd)
@@ -202,7 +202,7 @@ def main():
     fig3.write_html("plot_twinx_linear.html")
     fig4 = utils.plot_twinx_for_date(pl.from_pandas(merged_pd), "2024-08-07")
     fig4.write_html("plot_twinx_for_date_linear.html")
-    merged_pd.to_csv("merged3.csv")
+    
     # utils.plot_basis(merged_pd).show()
     # utils.plot_basis(merged_pd,in_bps=True).show()
     # utils.plot_basis_dual(merged_pd).show()
